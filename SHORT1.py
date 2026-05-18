@@ -8,7 +8,7 @@ import time
 import re
 
 # =================================================================
-# 🏦 네이버 금융 실시간 웹 스크래핑 엔진
+# 🏦 네이버 금융 실시간 웹 스크래핑 엔진 (종목명 추출 기능 추가)
 # =================================================================
 class NaverFinanceAPI:
     def __init__(self):
@@ -17,22 +17,33 @@ class NaverFinanceAPI:
         }
 
     def get_realtime_price(self, ticker):
-        """ 네이버 금융 실시간 주가창에서 현재가, 고가, 저가, 거래량을 정밀 추출 """
+        """ 네이버 금융 실시간 주가창에서 종목명, 현재가, 고가, 저가, 거래량을 정밀 추출 """
         try:
             clean_ticker = str(ticker).strip()
             url = f"https://finance.naver.com/item/main.naver?code={clean_ticker}"
             res = requests.get(url, headers=self.headers, timeout=1.5)
             
+            # 기본 방어 스펙 설정
+            result = {"Name": f"종목({clean_ticker})", "Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
+            
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, "html.parser")
+                
+                # [핵심 보완] 네이버 금융 헤더 영역에서 실제 종목명 추출
+                wrap_company = soup.find("div", {"class": "wrap_company"})
+                if wrap_company and wrap_company.find("h2"):
+                    extracted_name = wrap_company.find("h2").text.strip()
+                    if extracted_name:
+                        result["Name"] = extracted_name
                 
                 # 1. 현재가 추출
                 today_div = soup.find("div", {"class": "today"})
                 if not today_div:
-                    return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
+                    return result
                 
                 blind_now = today_div.find("span", {"class": "blind"})
                 current_price = float(re.sub(r'[^\d]', '', blind_now.text))
+                result["Close"] = current_price
                 
                 # 2. 고가, 저가, 거래량 추출
                 no_info_table = soup.find("table", {"class": "no_info"})
@@ -58,31 +69,20 @@ class NaverFinanceAPI:
                             volume = float(re.sub(r'[^\d]', '', text_val))
 
                 if current_price > 0:
-                    return {
-                        "Close": current_price,
-                        "High": high_price if high_price > 0 else current_price,
-                        "Low": low_price if low_price > 0 else current_price,
-                        "Volume": volume if volume > 0 else 1000.0
-                    }
+                    result["High"] = high_price if high_price > 0 else current_price
+                    result["Low"] = low_price if low_price > 0 else current_price
+                    result["Volume"] = volume if volume > 0 else 1000.0
+                    return result
                     
-            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
+            return result
         except:
-            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
+            return {"Name": f"종목({ticker})", "Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
 
-# =================================================================
-# 🏷️ 국내 주요 종목 마스터 사전 (종목명 매핑 엔진)
-# =================================================================
+# 기본 하드코딩 사전 (웹 크롤링 실패 시 메모리 방어용 백업 데이터)
 STOCK_NAME_MAP = {
     "005930": "삼성전자", "000660": "SK하이닉스", "005380": "현대차", "000270": "기아",
-    "035420": "NAVER", "035720": "카카오", "068270": "셀트리온", "373220": "LG엔솔",
-    "207940": "삼바", "051910": "LG화학", "006400": "삼성SDI", "003550": "LG",
-    "005490": "POSCO홀딩스", "010140": "삼성중공업", "009540": "HD현대중공업", "105560": "KB금융",
-    "055550": "신한지주", "000810": "삼성화재", "015760": "한국전력", "028260": "삼성물산",
-    "247540": "에코프로비엠", "086520": "에코프로", "091500": "삼성전기", "352820": "하이브"
+    "035420": "NAVER", "035720": "카카오", "068270": "셀트리온", "373220": "LG엔솔"
 }
-
-def get_stock_name(ticker):
-    return STOCK_NAME_MAP.get(ticker, f"종목")
 
 # =================================================================
 # 📊 기술적 지표 퀀트 연산 엔진
@@ -126,7 +126,7 @@ def process_quant_signals(df):
     return df
 
 # =================================================================
-# 🖥️ 웹 대시보드 인터페이스 영역 (모바일 종목명+종목코드 완전 결합형)
+# 🖥️ 웹 대시보드 인터페이스 영역 (모바일 화면 최적화)
 # =================================================================
 st.set_page_config(page_title="스캐너", layout="centered")
 
@@ -135,6 +135,12 @@ if "custom_stock_pool" not in st.session_state:
 
 if "multi_market_data" not in st.session_state:
     st.session_state.multi_market_data = {}
+
+# 실시간 크롤링된 실제 이름들을 전역 유지하기 위한 메모리 세션 기동
+if "cached_stock_names" not in st.session_state:
+    st.session_state.cached_stock_names = STOCK_NAME_MAP.copy()
+
+api = NaverFinanceAPI()
 
 # 🛠️ [사이드바] 모바일 입력창
 st.sidebar.markdown("### 📋 종목 코드 등록")
@@ -151,11 +157,13 @@ if st.sidebar.button("⚡ 종목 등록/동기화", use_container_width=True):
 st.sidebar.markdown("---")
 st.sidebar.write(f"🔍 감시 중: {len(st.session_state.custom_stock_pool)}개")
 
-# 사이드바 감시 목록 노출 시에도 명칭+번호 결합형으로 직관성 확보
+# 사이드바 리스트 렌더링
 delete_target = None
 for tk in list(st.session_state.custom_stock_pool):
     col1, col2 = st.sidebar.columns([4, 1])
-    col1.caption(f"▪️ {get_stock_name(tk)} ({tk})")
+    # 메모리에 저장된 실시간 이름 매핑 매칭
+    display_name = st.session_state.cached_stock_names.get(tk, f"종목({tk})")
+    col1.caption(f"▪️ {display_name} ({tk})")
     if col2.button("❌", key=f"del_{tk}"):
         delete_target = tk
 
@@ -169,33 +177,39 @@ if delete_target:
 st.markdown("### 🏹 실시간 모바일 스캐너")
 st.caption(f"🔄 자동 갱신 중... ({datetime.now().strftime('%H:%M:%S')})")
 
-api = NaverFinanceAPI()
 current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 if st.button("🔑 버퍼 및 캐시 비우기", use_container_width=True):
     st.session_state.multi_market_data = {}
+    st.session_state.cached_stock_names = STOCK_NAME_MAP.copy()
     st.rerun()
 
 summary_rows = []
 
 # 멀티 종목 실시간 연산 가동
 for ticker in st.session_state.custom_stock_pool:
+    live_tick = api.get_realtime_price(ticker)
+    
+    # [핵심] 웹에서 정상 추출된 종목명을 세션 캐시에 실시간 반영 업데이트
+    if "Name" in live_tick and not live_tick["Name"].startswith("종목("):
+        st.session_state.cached_stock_names[ticker] = live_tick["Name"]
+        
+    actual_name = st.session_state.cached_stock_names.get(ticker, f"종목({ticker})")
+
     if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
-        raw_price = api.get_realtime_price(ticker)
         init_rows = []
         init_times = []
-        base_p = raw_price["Close"] if raw_price["Close"] > 0 else 50000.0
+        base_p = live_tick["Close"] if live_tick["Close"] > 0 else 50000.0
         
         for i in range(5, 0, -1):
             time_str = (datetime.now() - timedelta(minutes=i)).strftime('%Y-%m-%d %H:%M:%S')
             init_times.append(pd.to_datetime(time_str))
             mock_p = base_p + (i * 10 if i % 2 == 0 else -i * 5)
             init_rows.append({
-                "Close": mock_p, "High": mock_p * 1.001, "Low": mock_p * 0.999, "Volume": raw_price["Volume"]
+                "Close": mock_p, "High": mock_p * 1.001, "Low": mock_p * 0.999, "Volume": live_tick["Volume"]
             })
         st.session_state.multi_market_data[ticker] = pd.DataFrame(init_rows, index=init_times)
 
-    live_tick = api.get_realtime_price(ticker)
     if live_tick["Close"] > 0:
         new_df = pd.DataFrame([{"Close": live_tick["Close"], "High": live_tick["High"], "Low": live_tick["Low"], "Volume": live_tick["Volume"]}], index=[pd.to_datetime(current_time_str)])
         st.session_state.multi_market_data[ticker] = pd.concat([st.session_state.multi_market_data[ticker], new_df])
@@ -214,8 +228,8 @@ for ticker in st.session_state.custom_stock_pool:
 
     summary_rows.append({
         "종목코드": ticker,
-        "종목명": get_stock_name(ticker),  
-        "현재 타이밍 신호": latest_info["타이밍 신호"],  # 오류 해결: 정상 칼럼으로 수정 완료
+        "종목명": actual_name,  
+        "현재 타이밍 신호": latest_info["타이밍 신호"],
         "현재가": int(latest_info['Close']),
         "수급선": int(latest_info['VWAP']),
         "RSI": int(latest_info["RSI"]),
@@ -238,7 +252,7 @@ if summary_rows:
         sig = row["현재 타이밍 신호"]
         rank = index + 1
         
-        # 헤더에 종목명과 종목번호 결합
+        # 실제 웹에서 긁어온 진짜 종목명과 코드를 완벽하게 결합하여 출력
         card_title = f"**[{rank}위] {row['종목명']} ({row['종목코드']})**"
         
         card_metrics = f"💰 **{row['현재가']:,}원** | RSI: `{row['RSI']}` | 📊 대금: **{int(row['실시간거래대금']/100000000):,}억**"
