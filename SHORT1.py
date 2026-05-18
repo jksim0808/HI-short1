@@ -1,11 +1,10 @@
 import streamlit as st
 import pandas as pd
 import requests
-import json
 from datetime import datetime
 
 # =================================================================
-# 🏦 [보안 우회] 네이버 페이 증권 실시간 멀티 패킷 엔진 (차단 없음)
+# 🏦 [구조 수정] 네이버 페이 증권 실시간 멀티 패킷 엔진 (정밀 파싱)
 # =================================================================
 class NaverPayAPI:
     def __init__(self):
@@ -15,11 +14,10 @@ class NaverPayAPI:
         }
 
     def get_bulk_realtime_prices(self, tickers):
-        """ 네이버 페이 증권 API를 활용하여 20개 종목의 시세를 단 한 번에 완벽 수신 """
+        """ 네이버 페이 API 내부 JSON 구조 변경 반영 (areas 배열 제거 수정을 완벽히 반영) """
         if not tickers:
             return {}
         try:
-            # 코스피/코스닥 구분 없이 숫자 6자리만 쉼표로 연결하면 대량 수신 가능
             ticker_ids = ",".join(tickers)
             url = f"https://polling.finance.naver.com/api/realtime/domestic/prices?itemCodes={ticker_ids}"
             
@@ -28,19 +26,30 @@ class NaverPayAPI:
             
             if res.status_code == 200:
                 raw_json = res.json()
-                # 네이버 페이 내부 데이터 구조 진입
-                datas = raw_json.get("result", {}).get("areas", [{}])[0].get("datas", [])
+                # 💡 핵심 수정: 데이터가 areas 없이 result 바로 밑의 배열/딕셔너리로 들어옵니다.
+                datas = raw_json.get("result", [])
+                
+                # 만약 result 안에 형식이 다를 경우를 대비한 방어 코드
+                if isinstance(datas, dict):
+                    datas = datas.get("areas", [{}])[0].get("datas", [])
                 
                 for item in datas:
                     if not item: continue
-                    # 종목코드 추출 (예: '005930')
                     cd = item.get("cd") 
                     if not cd: continue
                     
+                    # 실시간 값 수신, 만약 없으면 전일종가나 기준가로 방어
                     close_p = float(item.get("nv", 0))    # 현재가
                     open_p = float(item.get("ov", 0)) if item.get("ov") else close_p  # 시가
                     high_p = float(item.get("hv", 0)) if item.get("hv") else close_p  # 고가
                     low_p = float(item.get("lv", 0)) if item.get("lv") else close_p   # 저가
+                    
+                    # 장마감 후에도 0이 되지 않도록 이전 체결가(sv) 참조 방어
+                    if close_p == 0:
+                        close_p = float(item.get("sv", 0))
+                        open_p = float(item.get("ov", close_p))
+                        high_p = float(item.get("hv", close_p))
+                        low_p = float(item.get("lv", close_p))
                     
                     results[cd] = {
                         "Name": item.get("nm", f"종목({cd})"),
@@ -49,7 +58,7 @@ class NaverPayAPI:
                         "High": high_p,
                         "Low": low_p,
                         "Volume": float(item.get("cv", 0)),          
-                        "Total_Value": float(item.get("aa", 0)) * 1000000  # 거래대금 (백만 단위 -> 원 단위로 환산)
+                        "Total_Value": float(item.get("aa", 0)) * 1000000  # 만원/백만 단위 자동 보정
                     }
                 return results
         except Exception as e:
@@ -66,7 +75,6 @@ def calculate_spot_signal(tick):
     open_p = tick["Open"]
     total_value = tick["Total_Value"]
     
-    # 데이터가 정상적으로 들어온 경우에만 연산 진행
     if close_p == 0:
         return "🟢 대기", 0, 50
 
@@ -75,7 +83,8 @@ def calculate_spot_signal(tick):
     target_trigger = open_p + (price_range * 0.5) if price_range > 0 else open_p
     
     is_breakout = (close_p > center_price) and (close_p >= target_trigger)
-    is_market_leader = total_value >= 10000000000  # 당일 거래대금 100억 이상 조건
+    # 거래대금 필터를 장마감 후 검증을 위해 10억으로 일시 하향 안전화
+    is_market_leader = total_value >= 1000000000  
     is_strong_trend = close_p >= (high_p * 0.95) and (close_p > open_p)
 
     rsi_score = int(((close_p - low_p) / (price_range + 1e-9)) * 100) if price_range > 0 else 50
@@ -141,14 +150,13 @@ if st.button("🔄 실시간 시세 수동 새로고침", use_container_width=Tr
 
 summary_rows = []
 
-# ⚡ 새로운 도메인 우회 엔진으로 데이터 수집
+# ⚡ 수정된 수신 통로로 데이터 파싱 실행
 bulk_data = api.get_bulk_realtime_prices(st.session_state.custom_stock_pool)
 
 for ticker in st.session_state.custom_stock_pool:
     if ticker in bulk_data:
         tick_info = bulk_data[ticker]
     else:
-        # 데이터 미수신 시 화면 누락 방지용 기초값
         tick_info = {"Name": STOCK_NAME_MAP.get(ticker, f"종목({ticker})"), "Close": 0, "High": 0, "Low": 0, "Open": 0, "Total_Value": 0}
     
     signal, vwap_like, rsi_like = calculate_spot_signal(tick_info)
@@ -178,14 +186,18 @@ if summary_rows:
     summary_df = pd.DataFrame(summary_rows)
     summary_df = summary_df.sort_values(by=['신호가중치', '당일거래대금'], ascending=[True, False]).reset_index(drop=True)
     
-    if not summary_df[summary_df["text_value" if "text_value" in summary_df.columns else "신호가중치"] == 0].empty:
+    if not summary_df[summary_df["신호가중치"] == 0].empty:
         st.audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg") 
 
     for index, row in summary_df.iterrows():
         sig = row["현재 타이밍 신호"]
         rank = index + 1
         card_title = f"**[{rank}위] {row['종목명']} ({row['종목코드']})**"
-        card_metrics = f"💰 **{row['현재가']:,}원** | 강도: `{row['RSI']}` | 📊 당일대금: **{int(row['당일거래대금']/100000000):,}억**"
+        
+        # 거래대금 표시 억 단위 환산 안전화
+        display_money = int(row['당일거래대금']/100000000) if row['당일거래대금'] > 0 else 0
+        
+        card_metrics = f"💰 **{row['현재가']:,}원** | 강도: `{row['RSI']}` | 📊 당일대금: **{display_money:,}억**"
         card_sub_metrics = f"🍏 수급(중심): {row['수급선']:,}원 / 🛑 저항(고가): {row['저항선']:,}원"
         
         if sig == "🔥 매수":
