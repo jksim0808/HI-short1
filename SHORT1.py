@@ -13,28 +13,24 @@ APP_SECRET = st.secrets["HANTU_APP_SECRET"]
 MOCK_FLAG = True  
 # =================================================================
 
-# 📂 시장 전체 섹터 및 소속 주도 종목 풀(Pool) 마스터 데이터 정의
-SECTOR_MASTER = {
-    "⚡ 반도체 & AI/테크": {
-        "005930": "삼성전자", "000660": "SK하이닉스", "009150": "삼성전기", 
-        "066570": "LG전자", "018260": "삼성에스디에스", "036570": "엔씨소프트"
-    },
-    "🧬 바이오 & 헬스케어": {
-        "207940": "삼성바이오로직스", "068270": "셀트리온", "091990": "셀트리온제약", 
-        "028260": "삼성물산", "112610": "씨젠", "319660": "피엔에이치테크"
-    },
-    "🔋 2차전지 & 신소재": {
-        "373220": "LG에너지솔루션", "051910": "LG화학", "006400": "삼성SDI", 
-        "247540": "에코프로비엠", "086520": "에코프로", "005490": "POSCO홀딩스"
-    },
-    "🚗 자동차 & 중공업/기계": {
-        "005380": "현대차", "000270": "기아", "012330": "현대모비스", 
-        "009540": "HD현대중공업", "010950": "S-Oil", "011780": "금호석유"
-    },
-    "📱 플랫폼 & 엔터테인먼트": {
-        "035420": "NAVER", "035720": "카카오", "253450": "스튜디오드래곤", 
-        "403870": "포바이포", "352820": "하이브", "035900": "JYP Ent."
-    }
+# 📂 업종 구분 없이 전체 시장에서 추적할 주도주 마스터 데이터 Pool
+# (추적 대상을 전체적으로 통합 비교하기 위해 단일 딕셔너리로 병합)
+STOCK_MASTER_POOL = {
+    "005930": ("삼성전자", "반도체/테크"), "000660": ("SK하이닉스", "반도체/테크"), 
+    "009150": ("삼성전기", "반도체/테크"), "066570": ("LG전자", "반도체/테크"), 
+    "018260": ("삼성에스디에스", "반도체/테크"), "036570": ("엔씨소프트", "반도체/테크"),
+    "207940": ("삼성바이오로직스", "바이오/헬스"), "068270": ("셀트리온", "바이오/헬스"), 
+    "091990": ("셀트리온제약", "바이오/헬스"), "028260": ("삼성물산", "바이오/헬스"), 
+    "112610": ("씨젠", "바이오/헬스"), "319660": ("피엔에이치테크", "바이오/헬스"),
+    "373220": ("LG에너지솔루션", "2차전지/신소재"), "051910": ("LG화학", "2차전지/신소재"), 
+    "006400": ("삼성SDI", "2차전지/신소재"), "247540": ("에코프로비엠", "2차전지/신소재"), 
+    "086520": ("에코프로", "2차전지/신소재"), "005490": ("POSCO홀딩스", "2차전지/신소재"),
+    "005380": ("현대차", "자동차/중공업"), "000270": ("기아", "자동차/중공업"), 
+    "012330": ("현대모비스", "자동차/중공업"), "009540": ("HD현대중공업", "자동차/중공업"), 
+    "010950": ("S-Oil", "자동차/중공업"), "011780": ("금호석유", "자동차/중공업"),
+    "035420": ("NAVER", "플랫폼/엔터"), "035720": ("카카오", "플랫폼/엔터"), 
+    "253450": ("스튜디오드래곤", "플랫폼/엔터"), "403870": ("포바이포", "플랫폼/엔터"), 
+    "352820": ("하이브", "플랫폼/엔터"), "035900": ("JYP Ent.", "플랫폼/엔터")
 }
 
 class KoreaInvestmentAPI:
@@ -178,11 +174,10 @@ def process_quant_signals(df):
     return df
 
 # --- 웹 대시보드 인터페이스 초기화 및 설정 ---
-st.set_page_config(page_title="모바일 단타 스캐너", layout="centered")
+st.set_page_config(page_title="시장 통합 단타 스캐너", layout="centered")
 
-st.markdown("### 🏹 실시간 주도 섹터 수급 스캐너")
-# 실시간 새로고침 시 시각 확인용 초단위 헤더
-st.caption(f"⏱️ 실시간 스트리밍 중... (현재시각: {datetime.now().strftime('%H:%M:%S')})")
+st.markdown("### 🏹 전시장 통합 수급 돌파 스캐너 (TOP 30)")
+st.caption(f"⏱️ 전체 실시간 스트리밍 및 실시간 랭킹 실현 중... ({datetime.now().strftime('%H:%M:%S')})")
 
 if "multi_market_data" not in st.session_state:
     st.session_state.multi_market_data = {}
@@ -190,45 +185,16 @@ if "multi_market_data" not in st.session_state:
 api = KoreaInvestmentAPI()
 current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-# 수동 버퍼 초기화 기능만 유지 (스캔은 자동화됨)
 if st.button("🔑 데이터 버퍼 초기화", use_container_width=True):
     st.session_state.multi_market_data = {}
     st.rerun()
 
-# --- 실시간 섹터별 거래대금 스캔 및 유망순위 연산 ---
-sector_volumes = {}
-ticker_to_name_map = {}
-flat_ticker_list = []
-
-for sector_name, stocks in SECTOR_MASTER.items():
-    total_sector_money = 0.0
-    for tk, nm in stocks.items():
-        ticker_to_name_map[tk] = nm
-        flat_ticker_list.append(tk)
-        p_info = api.get_realtime_price(tk)
-        total_sector_money += (p_info["Close"] * p_info["Volume"])
-    sector_volumes[sector_name] = total_sector_money
-
-sorted_sectors = sorted(sector_volumes.items(), key=lambda x: x[1], reverse=True)
-
-with st.expander("📊 현재 업종 수급 순위 보기"):
-    for rank, (sec_name, vol) in enumerate(sorted_sectors, 1):
-        st.write(f"**{rank}위** : {sec_name} ({int(vol/100000000):,}억)")
-
-# --- 🌟 [핵심 변경: 루프마다 무조건 실시간 가격 반영] ---
+# --- 🌟 [변경] 업종별 제한을 풀고 시장 전체 종목 일괄 연산 처리 ---
 summary_rows = []
 total_accumulated_ticks = [] 
 
-for ticker in flat_ticker_list:
-    name = ticker_to_name_map[ticker]
-    
-    belonging_sector = "기타"
-    for sec_name, stocks in SECTOR_MASTER.items():
-        if ticker in stocks:
-            belonging_sector = sec_name
-            break
-
-    # 기저 5분봉 데이터 풀 빌드
+for ticker, (name, ref_sector) in STOCK_MASTER_POOL.items():
+    # 기저 데이터 빌드
     if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
         raw_price = api.get_realtime_price(ticker)
         init_rows = []
@@ -237,35 +203,32 @@ for ticker in flat_ticker_list:
         
         for i in range(5, 0, -1):
             time_str = (datetime.now() - timedelta(minutes=i)).strftime('%Y-%m-%d %H:%M:%S')
-            t = pd.to_datetime(time_str)
-            init_times.append(t)
+            init_times.append(pd.to_datetime(time_str))
             
             mock_p = base_p + (i * 100 if i % 2 == 0 else -i * 50)
             init_rows.append({
-                "Close": mock_p, 
-                "High": mock_p * 1.001, 
-                "Low": mock_p * 0.999, 
-                "Volume": raw_price["Volume"]
+                "Close": mock_p, "High": mock_p * 1.001, "Low": mock_p * 0.999, "Volume": raw_price["Volume"]
             })
             
-        tmp_df = pd.DataFrame(init_rows, index=init_times)
-        st.session_state.multi_market_data[ticker] = tmp_df
+        st.session_state.multi_market_data[ticker] = pd.DataFrame(init_rows, index=init_times)
 
-    # 🚀 수동 버튼 클릭 없이, 화면이 로드될 때마다 초단위 실시간 체결가 버퍼에 즉시 강제 병합
+    # 초단위 실시간 체결 데이터 버퍼 업데이트
     live_tick = api.get_realtime_price(ticker)
     if live_tick["Close"] > 0:
         new_df = pd.DataFrame([{"Close": live_tick["Close"], "High": live_tick["High"], "Low": live_tick["Low"], "Volume": live_tick["Volume"]}], index=[pd.to_datetime(current_time_str)])
         st.session_state.multi_market_data[ticker] = pd.concat([st.session_state.multi_market_data[ticker], new_df])
-        # 무한 증식 방지 (최근 15분 데이터로 유지 슬라이싱)
         st.session_state.multi_market_data[ticker] = st.session_state.multi_market_data[ticker].loc[~st.session_state.multi_market_data[ticker].index.duplicated(keep='last')].tail(15)
 
     total_accumulated_ticks.append(len(st.session_state.multi_market_data[ticker]))
 
+    # 퀀트 연산 및 핵심 정렬 데이터 산출
     calculated_df = process_quant_signals(st.session_state.multi_market_data[ticker].copy())
     latest_info = calculated_df.iloc[-1]
     
-    sector_rank = [i for i, (s_name, _) in enumerate(sorted_sectors) if s_name == belonging_sector][0]
+    # 실시간 거래대금 산출 (현재가 * 당일 누적 거래량)
+    realtime_trading_value = latest_info['Close'] * latest_info['Volume']
     
+    # 신호별 우선순위 가중치 부여 (매수 타점발생이 무조건 0순위로 상단에 표출)
     signal_weight = 2
     if latest_info["타이밍 신호"] == "🔥 매수 타점!!":
         signal_weight = 0
@@ -273,7 +236,7 @@ for ticker in flat_ticker_list:
         signal_weight = 1
 
     summary_rows.append({
-        "소속 업종": belonging_sector,
+        "참조 업종": ref_sector,
         "종목코드": ticker,
         "종목명": name,
         "현재 타이밍 신호": latest_info["타이밍 신호"],
@@ -281,35 +244,36 @@ for ticker in flat_ticker_list:
         "수급선": int(latest_info['VWAP']),
         "RSI": int(latest_info["RSI"]),
         "저항선": int(latest_info['Local_High']),
-        "업종순위가중치": sector_rank,
+        "실시간거래대금": realtime_trading_value,
         "신호가중치": signal_weight
     })
 
+# --- 🌟 [정밀 통합 정렬 및 TOP 30 컷오프 처리] ---
+# 1순위: 매수타점 여부순(신호가중치 오름차순), 2순위: 거래대금 크기순(내림차순)으로 전체 일괄 정렬
 summary_df = pd.DataFrame(summary_rows)
-summary_df = summary_df.sort_values(by=['신호가중치', '업종순위가중치']).reset_index(drop=True)
+summary_df = summary_df.sort_values(
+    by=['신호가중치', '실시간거래대금'], 
+    ascending=[True, False]
+).head(30).reset_index(drop=True) # 💥 정확히 상위 30개만 선별 절단
 
-# --- 현재 시전 평가 전광판 모듈 ---
+# --- 현재 버퍼 데이터 상태 진단 표시 ---
 avg_ticks = np.mean(total_accumulated_ticks) if total_accumulated_ticks else 5
 data_maturity = min(100, int((avg_ticks / 15.0) * 100))
+st.progress(data_maturity / 100.0, text=f"📈 전시장 수급 추적 데이터 축적도: {data_maturity}%")
 
-if data_maturity <= 40:
-    st.info(f"⏳ **현재 시전 점검**: 데이터 축적도 **{data_maturity}%** (실시간 시세 연속 흡수 중...)")
-elif data_maturity < 80:
-    st.success(f"⚡ **현재 시전 점검**: 데이터 축적도 **{data_maturity}%** (실시간 시세 추적 활성화 상태)")
-else:
-    st.error(f"🔥 **현재 시전 점검**: 데이터 축적도 **{data_maturity}%** (돌파 타점 실시간 평가 신뢰도 최상)")
-
-# --- 카드형 리스트 순차 출력 ---
+# --- 30대 주도주 스캐너 전광판 리스트 출력 ---
 st.markdown("---")
 
 has_buy_signal = not summary_df[summary_df["신호가중치"] == 0].empty
 if has_buy_signal:
     st.audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg") 
 
+# 선별된 통합 30대 종목을 순위별 카드 출력
 for index, row in summary_df.iterrows():
     sig = row["현재 타이밍 신호"]
-    card_header = f"**{row['종목명']}** ({row['종목코드']}) ｜ {row['소속 업종']}"
-    card_body = f"💰 **현재가**: {row['현재가']:,}원 ｜ 📈 **RSI**: {row['RSI']}\n\n🍏 **수급선(VWAP)**: {row['수급선']:,}원 ｜ 🛑 **저항선**: {row['저항선']:,}원"
+    rank_idx = index + 1
+    card_header = f"**[{rank_idx}위] {row['종목명']}** ({row['종목코드']}) ｜ `{row['참조 업종']}`"
+    card_body = f"💰 **현재가**: {row['현재가']:,}원 ｜ 📈 **RSI**: {row['RSI']} ｜ 📊 **당일 거래대금**: {int(row['실시간거래대금']/100000000):,}억\n\n🍏 **수급선(VWAP)**: {row['수급선']:,}원 ｜ 🛑 **저항선**: {row['저항선']:,}원"
     
     if sig == "🔥 매수 타점!!":
         with st.container():
@@ -328,7 +292,7 @@ for index, row in summary_df.iterrows():
             st.markdown("---")
 
 # =================================================================
-# 🔄 [핵심] 초단위 자동 인코딩 무한루프 엔진 (모바일 백그라운드 유지 보장)
+# 🔄 초단위 자동 인코딩 무한루프 엔진 (1.5초 간격 랭킹 및 타점 리프레시)
 # =================================================================
-time.sleep(1.5) # API 과부하 방지를 위한 1.5초 딜레이 간격 조절
+time.sleep(1.5)
 st.rerun()
