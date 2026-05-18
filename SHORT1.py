@@ -6,11 +6,11 @@ import json
 from datetime import datetime
 
 # =================================================================
-# 🔑 [필수 수정] 한국투자증권 Open API Key 직접 고정 설정
+# 🔑 [보안 보완] Streamlit 내부 비밀 금고(Secrets)에서 키를 안전하게 불러옴
 # =================================================================
-APP_KEY = "PStJmUgIXFv3YcarDFbZ3IMH2FzWfv6O3LYE"
-APP_SECRET = "fk8HSHkURygDTLWZxFEAeWU3zIdBAvmo/ndNE/DrBq78D0cjN5bGSXYUD49hsz0/nGVtItjpZzRP6X84iE3grpTay7EZzEzM9Cdoe9cT434+hi9b/tEf9HgTqwwach86tnggK5rmmYS0hn+0GzmZ7WV+nizQNMgT6tZkYC7Z0kbNMxOzDdA="
-MOCK_FLAG = True  # True: 모의투자 서버 사용 / False: 실운영 서버 사용
+APP_KEY = st.secrets["HANTU_APP_KEY"]
+APP_SECRET = st.secrets["HANTU_APP_SECRET"]
+MOCK_FLAG = True  # True: 모의투자 / False: 실운영
 # =================================================================
 
 # --- 1. 한국투자증권 API 통신 클래스 (토큰 세션 저장형) ---
