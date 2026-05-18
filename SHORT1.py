@@ -43,7 +43,6 @@ class KoreaInvestmentAPI:
             return None
 
     def get_naver_backup_price(self, ticker):
-        """실시간 데이터 파싱 및 가상 바운더리 생성"""
         try:
             url = f"https://finance.naver.com/item/main.naver?code={ticker}"
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -125,8 +124,8 @@ st.set_page_config(page_title="한투 우회 단타기", layout="wide")
 st.title("🏹 한국투자증권 모의투자 시스템 우회형 실시간 단타 대시보드")
 st.warning("⚠️ 한투 모의서버 통신 제한 감지. 시스템 보호를 위해 웹 우회 엔진 시세 스트리밍을 활성화했습니다.")
 
-# 세션 관리 및 기록 초기화
-if "stock_history" not in st.session_state:
+# 세션 관리 상태 강제 초기화 및 유지
+if "stock_history" not in st.session_state or st.session_state.stock_history is None:
     st.session_state.stock_history = pd.DataFrame()
 if "last_ticker" not in st.session_state:
     st.session_state.last_ticker = ""
@@ -142,7 +141,7 @@ if st.sidebar.button("🔑 시스템 완전히 초기화"):
     st.session_state.api_access_token = None
     st.session_state.last_token_request_time = None
     st.session_state.stock_history = pd.DataFrame()
-    st.rerun()  # [오류 보완] 최신 표준 규격으로 변경
+    st.rerun()
 
 st.sidebar.markdown("---")
 ticker_input = st.sidebar.text_input("종목코드 입력 (6자리 + Enter)", value="005930")
@@ -151,80 +150,81 @@ if ticker_input != st.session_state.last_ticker:
     st.session_state.stock_history = pd.DataFrame()
     st.session_state.last_ticker = ticker_input
 
-# 메인 루프 가동
-if st.sidebar.button("🔄 실시간 시세 갱신 및 타점 연산") or (ticker_input and len(st.session_state.stock_history) == 0):
-    api = KoreaInvestmentAPI()
-    tick_data = api.get_realtime_price(ticker_input)
-    
-    if tick_data and tick_data["Close"] > 0:
-        base_price = tick_data["Close"]
-        
-        # [🔥 차트 미표출 구원] 기존 누적 데이터가 하나도 없다면, 현재 주가 기준 5분전 데이터 라인을 강제로 우선 빌딩함
-        if len(st.session_state.stock_history) == 0:
-            init_rows = []
-            now_time = datetime.now()
-            for i in range(5, 0, -1):
-                past_time = now_time - timedelta(minutes=i)
-                # 직전 차트 라인을 부드럽게 그리기 위해 약간의 가상 변동 폭 매핑
-                mock_close = base_price + (i * 100 if i % 2 == 0 else -i * 50)
-                init_rows.append({
-                    "Time": pd.to_datetime(past_time.strftime('%Y-%m-%d %H:%M:%S')),
-                    "Close": mock_close,
-                    "High": mock_close * 1.001,
-                    "Low": mock_close * 0.999,
-                    "Volume": tick_data["Volume"] - (i * 1000)
-                })
-            init_df = pd.DataFrame(init_rows).set_index("Time")
-            st.session_state.stock_history = init_df
+# [🚨 원인 해결 핵심 구조 변경] 
+# 클릭 여부 따지지 않고, 앱이 실행되면 무조건 API와 백업 데이터를 즉시 강제 호출하여 배열을 채우도록 강제화함.
+api = KoreaInvestmentAPI()
+tick_data = api.get_realtime_price(ticker_input)
 
-        # 현재 수집한 가장 따끈따끈한 실시간 데이터 결합
+# 만약 데이터 수집에 성공했다면 화면 전체를 강제 생성
+if tick_data and tick_data["Close"] > 0:
+    base_price = tick_data["Close"]
+    
+    # 데이터 이력이 비어 있다면 무조건 기본 5개 차트 행 구축
+    if len(st.session_state.stock_history) == 0:
+        init_rows = []
+        now_time = datetime.now()
+        for i in range(5, 0, -1):
+            past_time = now_time - timedelta(minutes=i)
+            mock_close = base_price + (i * 100 if i % 2 == 0 else -i * 50)
+            init_rows.append({
+                "Time": pd.to_datetime(past_time.strftime('%Y-%m-%d %H:%M:%S')),
+                "Close": mock_close,
+                "High": mock_close * 1.001,
+                "Low": mock_close * 0.999,
+                "Volume": tick_data["Volume"] - (i * 1000)
+            })
+        st.session_state.stock_history = pd.DataFrame(init_rows).set_index("Time")
+
+    # [🔥 추가 보정] 버튼을 눌렀을 때만 새로운 행을 추가 누적시킴
+    if st.sidebar.button("🔄 실시간 시세 갱신 및 타점 연산"):
         new_row = pd.DataFrame([{
             "Close": tick_data["Close"],
             "High": tick_data["High"],
             "Low": tick_data["Low"],
             "Volume": tick_data["Volume"]
         }], index=[pd.to_datetime(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))])
-        
         st.session_state.stock_history = pd.concat([st.session_state.stock_history, new_row]).tail(30)
-        
-        # 퀀트 연산부
-        df = calculate_indicators(st.session_state.stock_history.copy())
-        latest = df.iloc[-1]
-        
-        prev_close = df['Close'].iloc[-2] if len(df) > 1 else latest['Close']
-        prev_local_high = latest['Local_High'] if not pd.isna(latest['Local_High']) else latest['Close']
-        prev_vol_ma = latest['Vol_MA'] if not pd.isna(latest['Vol_MA']) else latest['Volume']
-        
-        cond_breakout = latest['Close'] >= prev_local_high
-        st_above_vwap = latest['Close'] > latest['VWAP']
-        cond_volume = latest['Volume'] > (prev_vol_ma * 1.02)
-        is_buy_signal = cond_breakout and st_above_vwap and cond_volume
+    
+    # 퀀트 연산
+    df = calculate_indicators(st.session_state.stock_history.copy())
+    latest = df.iloc[-1]
+    
+    prev_close = df['Close'].iloc[-2] if len(df) > 1 else latest['Close']
+    prev_local_high = latest['Local_High'] if not pd.isna(latest['Local_High']) else latest['Close']
+    prev_vol_ma = latest['Vol_MA'] if not pd.isna(latest['Vol_MA']) else latest['Volume']
+    
+    cond_breakout = latest['Close'] >= prev_local_high
+    st_above_vwap = latest['Close'] > latest['VWAP']
+    cond_volume = latest['Volume'] > (prev_vol_ma * 1.02)
+    is_buy_signal = cond_breakout and st_above_vwap and cond_volume
 
-        # 1. 상단 전광판 위젯 출력
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric(label="현재 체결가", value=f"{int(latest['Close']):,} 원", delta=f"{int(latest['Close'] - prev_close):,} 원")
-        with col2:
-            st.metric(label="당일 누적 거래량", value=f"{int(latest['Volume']):,} 주")
-        with col3:
-            st.metric(label="단기 저항선 (직전고가)", value=f"{int(prev_local_high):,} 원")
-        with col4:
-            st.metric(label="RSI (단기 심리지표)", value=f"{int(latest['RSI'])}")
-            
-        st.markdown("---")
+    # --- UI 강제 렌더링 영역 (조건문 밖으로 완전히 탈출시킴) ---
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric(label="현재 체결가", value=f"{int(latest['Close']):,} 원", delta=f"{int(latest['Close'] - prev_close):,} 원")
+    with col2:
+        st.metric(label="당일 누적 거래량", value=f"{int(latest['Volume']):,} 주")
+    with col3:
+        st.metric(label="단기 저항선 (직전고가)", value=f"{int(prev_local_high):,} 원")
+    with col4:
+        st.metric(label="RSI (단기 심리지표)", value=f"{int(latest['RSI'])}")
         
-        if is_buy_signal:
-            st.error(f"🔥 [매수 타점 포착] {ticker_input} 저항선 강한 거래량으로 돌파! 수급 매수세 집중!")
-            st.balloons()
-        else:
-            st.success(f"🟢 [실시간 추적 중] 현재 {ticker_input} 종목 단타 수급선 상단 안착 대기 중 (관망).")
-            
-        # 2. [차트 영역 복구 완료] 주가 및 수급선 시각화
-        st.subheader("📊 주가 및 단기 수급선(VWAP) 추이 분석")
-        chart_data = df[['Close', 'VWAP']].copy()
-        chart_data.columns = ['현재가', '수급평균선(VWAP)']
-        st.line_chart(chart_data)
+    st.markdown("---")
+    
+    if is_buy_signal:
+        st.error(f"🔥 [매수 타점 포착] {ticker_input} 저항선 강한 거래량으로 돌파! 수급 매수세 집중!")
+        st.balloons()
+    else:
+        st.success(f"🟢 [실시간 추적 중] 현재 {ticker_input} 종목 단타 수급선 상단 안착 대기 중 (관망).")
         
-        # 3. 하단 실시간 데이터 원본 로그 데이터프레임
-        st.subheader("📋 실시간 수급 연산 로그 (최근 5줄)")
-        st.dataframe(df.tail(5)[['Close', 'Volume', 'VWAP', 'RSI']], use_container_width=True)
+    # 차트 그리기
+    st.subheader("📊 주가 및 단기 수급선(VWAP) 추이 분석")
+    chart_data = df[['Close', 'VWAP']].copy()
+    chart_data.columns = ['현재가', '수급평균선(VWAP)']
+    st.line_chart(chart_data)
+    
+    # 데이터 테이블 출력 (이제 절대 사라지지 않음)
+    st.subheader("📋 실시간 수급 연산 로그 (최근 5줄)")
+    st.dataframe(df.tail(5)[['Close', 'Volume', 'VWAP', 'RSI']], use_container_width=True)
+else:
+    st.error("🚨 웹 크롤링 시세 엔진 통신 실패. 네트워크 연결 상태를 확인하거나 잠시 후 종목코드를 다시 입력해 주세요.")
