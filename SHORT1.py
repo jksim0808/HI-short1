@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import requests
 from datetime import datetime, timedelta
+import time
 
 # =================================================================
 # 🔑 [모의투자 계좌 설정] Streamlit Secrets 내부 금고 연동
@@ -106,7 +107,6 @@ class KoreaInvestmentAPI:
         if not access_token:
             return self.get_yahoo_backup_price(ticker)
             
-        # 🌟 [수정] 호가(FHKST01010100) 대신 실시간 체결가 중심인 '주식현재가 시세(FHKST01010200)'로 변경
         url = f"{self.base_url}/uapi/domestic-stock/v1/quoting/inquire-price"
         headers = {
             "Content-Type": "application/json",
@@ -123,7 +123,6 @@ class KoreaInvestmentAPI:
                 if not res_data or res_data.get("stck_prpr") == "" or res_data.get("stck_prpr") is None:
                     return self.get_yahoo_backup_price(ticker)
                 
-                # 문자열 부호나 공백 제거 후 정확히 Float 형변환
                 current_price = float(str(res_data.get("stck_prpr")).strip().replace("-", "").replace("+", ""))
                 high_price = float(str(res_data.get("stck_hgpr", current_price)).strip().replace("-", "").replace("+", ""))
                 low_price = float(str(res_data.get("stck_lwpr", current_price)).strip().replace("-", "").replace("+", ""))
@@ -182,6 +181,8 @@ def process_quant_signals(df):
 st.set_page_config(page_title="모바일 단타 스캐너", layout="centered")
 
 st.markdown("### 🏹 실시간 주도 섹터 수급 스캐너")
+# 실시간 새로고침 시 시각 확인용 초단위 헤더
+st.caption(f"⏱️ 실시간 스트리밍 중... (현재시각: {datetime.now().strftime('%H:%M:%S')})")
 
 if "multi_market_data" not in st.session_state:
     st.session_state.multi_market_data = {}
@@ -189,13 +190,8 @@ if "multi_market_data" not in st.session_state:
 api = KoreaInvestmentAPI()
 current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-col_btn1, col_btn2 = st.columns(2)
-with col_btn1:
-    scan_trigger = st.button("🔄 실시간 스캔", use_container_width=True)
-with col_btn2:
-    reset_trigger = st.button("🔑 버퍼 초기화", use_container_width=True)
-
-if reset_trigger:
+# 수동 버퍼 초기화 기능만 유지 (스캔은 자동화됨)
+if st.button("🔑 데이터 버퍼 초기화", use_container_width=True):
     st.session_state.multi_market_data = {}
     st.rerun()
 
@@ -219,7 +215,7 @@ with st.expander("📊 현재 업종 수급 순위 보기"):
     for rank, (sec_name, vol) in enumerate(sorted_sectors, 1):
         st.write(f"**{rank}위** : {sec_name} ({int(vol/100000000):,}억)")
 
-# 전광판 데이터 연산 루프
+# --- 🌟 [핵심 변경: 루프마다 무조건 실시간 가격 반영] ---
 summary_rows = []
 total_accumulated_ticks = [] 
 
@@ -232,6 +228,7 @@ for ticker in flat_ticker_list:
             belonging_sector = sec_name
             break
 
+    # 기저 5분봉 데이터 풀 빌드
     if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
         raw_price = api.get_realtime_price(ticker)
         init_rows = []
@@ -254,12 +251,13 @@ for ticker in flat_ticker_list:
         tmp_df = pd.DataFrame(init_rows, index=init_times)
         st.session_state.multi_market_data[ticker] = tmp_df
 
-    if scan_trigger:
-        live_tick = api.get_realtime_price(ticker)
-        if live_tick["Close"] > 0:
-            new_df = pd.DataFrame([{"Close": live_tick["Close"], "High": live_tick["High"], "Low": live_tick["Low"], "Volume": live_tick["Volume"]}], index=[pd.to_datetime(current_time_str)])
-            st.session_state.multi_market_data[ticker] = pd.concat([st.session_state.multi_market_data[ticker], new_df])
-            st.session_state.multi_market_data[ticker] = st.session_state.multi_market_data[ticker].loc[~st.session_state.multi_market_data[ticker].index.duplicated(keep='last')].tail(15)
+    # 🚀 수동 버튼 클릭 없이, 화면이 로드될 때마다 초단위 실시간 체결가 버퍼에 즉시 강제 병합
+    live_tick = api.get_realtime_price(ticker)
+    if live_tick["Close"] > 0:
+        new_df = pd.DataFrame([{"Close": live_tick["Close"], "High": live_tick["High"], "Low": live_tick["Low"], "Volume": live_tick["Volume"]}], index=[pd.to_datetime(current_time_str)])
+        st.session_state.multi_market_data[ticker] = pd.concat([st.session_state.multi_market_data[ticker], new_df])
+        # 무한 증식 방지 (최근 15분 데이터로 유지 슬라이싱)
+        st.session_state.multi_market_data[ticker] = st.session_state.multi_market_data[ticker].loc[~st.session_state.multi_market_data[ticker].index.duplicated(keep='last')].tail(15)
 
     total_accumulated_ticks.append(len(st.session_state.multi_market_data[ticker]))
 
@@ -295,11 +293,11 @@ avg_ticks = np.mean(total_accumulated_ticks) if total_accumulated_ticks else 5
 data_maturity = min(100, int((avg_ticks / 15.0) * 100))
 
 if data_maturity <= 40:
-    st.info(f"⏳ **현재 시전 점검**: 데이터 축적도 **{data_maturity}%** (기저 데이터 빌드 완료. '실시간 스캔'을 눌러 실시간 시세를 채워 갈수록 타점 평가가 정밀해집니다.)")
+    st.info(f"⏳ **현재 시전 점검**: 데이터 축적도 **{data_maturity}%** (실시간 시세 연속 흡수 중...)")
 elif data_maturity < 80:
-    st.success(f"⚡ **현재 시전 점검**: 데이터 축적도 **{data_maturity}%** (실시간 시세 정상 추적 중. 데이터 신뢰도 보통)")
+    st.success(f"⚡ **현재 시전 점검**: 데이터 축적도 **{data_maturity}%** (실시간 시세 추적 활성화 상태)")
 else:
-    st.error(f"🔥 **현재 시전 점검**: 데이터 축적도 **{data_maturity}%** (최대치 버퍼 확보 완료! 돌파 타점 실시간 평가 신뢰도 최상)")
+    st.error(f"🔥 **현재 시전 점검**: 데이터 축적도 **{data_maturity}%** (돌파 타점 실시간 평가 신뢰도 최상)")
 
 # --- 카드형 리스트 순차 출력 ---
 st.markdown("---")
@@ -328,3 +326,9 @@ for index, row in summary_df.iterrows():
             st.success(f"🍏 **{sig}** ｜ {card_header}")
             st.markdown(card_body)
             st.markdown("---")
+
+# =================================================================
+# 🔄 [핵심] 초단위 자동 인코딩 무한루프 엔진 (모바일 백그라운드 유지 보장)
+# =================================================================
+time.sleep(1.5) # API 과부하 방지를 위한 1.5초 딜레이 간격 조절
+st.rerun()
