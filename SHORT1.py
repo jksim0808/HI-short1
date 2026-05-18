@@ -3,21 +3,21 @@ import pandas as pd
 import numpy as np
 import requests
 import json
-import time
 from datetime import datetime, timedelta
 
 # =================================================================
-# 🔑 [실전 계좌 설정] Streamlit Secrets 내부 금고 연동
+# 🔑 [모의투자 계좌 설정] Streamlit Secrets 내부 금고 연동
 # =================================================================
 APP_KEY = st.secrets["HANTU_APP_KEY"]
 APP_SECRET = st.secrets["HANTU_APP_SECRET"]
-MOCK_FLAG = False  # 실전 투자용 Key 고정
+MOCK_FLAG = True  # 👈 [핵심 수정] 모의투자 Key이므로 True로 고정합니다!
 # =================================================================
 
 class KoreaInvestmentAPI:
     def __init__(self):
+        # MOCK_FLAG가 True이므로 자동으로 모의투자 전용 가상 서버 주소로 매핑됩니다.
         if MOCK_FLAG:
-            self.base_url = "https://openapivts.koreainvestment.com:29443" 
+            self.base_url = "https://openapivts.koreainvestment.com:29443" # 모의투자 서버
         else:
             self.base_url = "https://openapi.koreainvestment.com:9443"
             
@@ -25,21 +25,19 @@ class KoreaInvestmentAPI:
         self.app_secret = APP_SECRET
 
     def get_access_token(self):
-        """1분당 1회 무한루프 차단 안전장치가 적용된 토큰 발급 로직"""
-        # 1. 이미 정상 발급된 토큰이 메모리에 있다면 즉시 재사용
+        """1분당 1회 제한 및 무한루프를 차단하는 모의투자 토큰 발급 로직"""
         if "api_access_token" in st.session_state and st.session_state.api_access_token:
             return st.session_state.api_access_token
 
-        # 2. [핵심 보안] 1분 이내에 토큰 요청을 보낸 적이 있다면 한투 서버 호출을 원천 차단
+        # 1분 이내 재요청 제한 필터
         now = datetime.now()
         if "last_token_request_time" in st.session_state and st.session_state.last_token_request_time:
             time_passed = now - st.session_state.last_token_request_time
             if time_passed < timedelta(minutes=1):
                 wait_sec = 60 - int(time_passed.total_seconds())
-                st.warning(f"⏳ 과도한 로그인을 방지하기 위해 프로그램 내부에서 재요청을 차단했습니다. {wait_sec}초 후 한투 서버에 접속합니다.")
+                st.warning(f"⏳ 과도한 로그인을 방지하기 위해 락이 걸렸습니다. {wait_sec}초 후 자동으로 한투 모의서버에 접속합니다.")
                 return None
 
-        # 마지막 요청 시간 기록 (실패하더라도 1분간 재요청 방지)
         st.session_state.last_token_request_time = now
 
         url = f"{self.base_url}/oauth2/tokenP"
@@ -57,10 +55,10 @@ class KoreaInvestmentAPI:
                 return token
             else:
                 error_msg = response.json().get('error_description', '알 수 없는 에러')
-                st.error(f"❌ 한투 실전 서버 인증 실패: {error_msg}")
+                st.error(f"❌ 한투 모의투자 서버 인증 실패: {error_msg}")
                 return None
         except Exception as e:
-            st.error(f"한투 실전 서버 연결 실패: {e}")
+            st.error(f"한투 모의투자 서버 연결 실패: {e}")
             return None
 
     def get_realtime_price(self, ticker):
@@ -87,12 +85,10 @@ class KoreaInvestmentAPI:
             if response.status_code == 200:
                 res_data = response.json().get("output", {})
                 
-                # 장외 시간 예외 처리 보호 로직
                 if not res_data or res_data.get("stck_prpr") == "":
-                    msg = response.json().get("msg1", "현재 장외 시간이거나 종목코드가 올바르지 않습니다.")
-                    st.info(f"ℹ️ 한투 안내: {msg}")
-                    # 장외 시간 테스트용 가상 가체결 데이터 반환 (다운 방지)
-                    return {"Close": 75000.0, "High": 76000.0, "Low": 74500.0, "Volume": 100000.0}
+                    msg = response.json().get("msg1", "데이터를 불러오지 못했습니다.")
+                    st.info(f"ℹ️ 한투 모의투자 안내: {msg}")
+                    return None
                     
                 return {
                     "Close": float(res_data.get("stck_prpr", 0)),
@@ -125,12 +121,11 @@ def calculate_indicators(df):
     return df
 
 # --- 3. 웹 UI 화면 구성 ---
-st.set_page_config(page_title="한투 실전 단타기", layout="wide")
+st.set_page_config(page_title="한투 모의 단타기", layout="wide")
 
-st.title("🏹 한국투자증권 실전 연동 실시간 단타 예측 대시보드")
-st.markdown("안전 필터링 로직이 적용되어 제한 에러 없이 안정적으로 구동됩니다.")
+st.title("🏹 한국투자증권 모의투자 연동 실시간 단타 예측 대시보드")
+st.markdown("모의투자 전용 테스트 서버(`openapivts`)와 안전하게 동기화되었습니다.")
 
-# 세션 상태 초기화
 if "stock_history" not in st.session_state:
     st.session_state.stock_history = pd.DataFrame()
 if "last_ticker" not in st.session_state:
@@ -141,7 +136,7 @@ if "last_token_request_time" not in st.session_state:
     st.session_state.last_token_request_time = None
 
 st.sidebar.header("🔍 대시보드 제어")
-st.sidebar.error("🔥 시스템 상태: 한국투자증권 실전계좌 가동중")
+st.sidebar.info("🟢 시스템 상태: 모의투자 테스트 서버 가동중")
 
 if st.sidebar.button("🔑 토큰 및 타이머 완전 초기화"):
     st.session_state.api_access_token = None
@@ -155,7 +150,6 @@ if ticker_input != st.session_state.last_ticker:
     st.session_state.stock_history = pd.DataFrame()
     st.session_state.last_ticker = ticker_input
 
-# 초기 구동 또는 버튼 클릭 시 작동
 if st.sidebar.button("🔄 실시간 시세 갱신 및 타점 연산") or (ticker_input and len(st.session_state.stock_history) == 0):
     api = KoreaInvestmentAPI()
     tick_data = api.get_realtime_price(ticker_input)
@@ -198,7 +192,7 @@ if st.sidebar.button("🔄 실시간 시세 갱신 및 타점 연산") or (ticke
             st.error(f"🔥 [매수 타점 포착] {ticker_input} 종목 저항선 돌파 및 VWAP 상방 수급 집중!")
             st.balloons()
         else:
-            st.success(f"🟢 [실전 추적 중] 현재 {ticker_input} 종목 관망/대기 상태.")
+            st.success(f"🟢 [정상 추적 중] 현재 {ticker_input} 종목 모의 수급 관망 상태.")
             
         st.subheader("📊 주가 및 단기 수급선(VWAP) 추이 분석")
         chart_data = df[['Close', 'VWAP']]
