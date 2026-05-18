@@ -106,26 +106,34 @@ class KoreaInvestmentAPI:
         if not access_token:
             return self.get_yahoo_backup_price(ticker)
             
+        # 🌟 [수정] 호가(FHKST01010100) 대신 실시간 체결가 중심인 '주식현재가 시세(FHKST01010200)'로 변경
         url = f"{self.base_url}/uapi/domestic-stock/v1/quoting/inquire-price"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {access_token}",
             "appkey": self.app_key,
             "appsecret": self.app_secret,
-            "tr_id": "FHKST01010100"
+            "tr_id": "FHKST01010200" 
         }
         params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker}
         try:
             response = requests.get(url, headers=headers, params=params)
             if response.status_code == 200:
                 res_data = response.json().get("output", {})
-                if not res_data or res_data.get("stck_prpr") == "":
+                if not res_data or res_data.get("stck_prpr") == "" or res_data.get("stck_prpr") is None:
                     return self.get_yahoo_backup_price(ticker)
+                
+                # 문자열 부호나 공백 제거 후 정확히 Float 형변환
+                current_price = float(str(res_data.get("stck_prpr")).strip().replace("-", "").replace("+", ""))
+                high_price = float(str(res_data.get("stck_hgpr", current_price)).strip().replace("-", "").replace("+", ""))
+                low_price = float(str(res_data.get("stck_lwpr", current_price)).strip().replace("-", "").replace("+", ""))
+                volume = float(str(res_data.get("accl_tr_vol", 0)).strip())
+                
                 return {
-                    "Close": float(res_data.get("stck_prpr", 0)),
-                    "High": float(res_data.get("stck_hgpr", 0)),
-                    "Low": float(res_data.get("stck_lwpr", 0)),
-                    "Volume": float(res_data.get("accl_tr_vol", 0))
+                    "Close": current_price,
+                    "High": high_price if high_price > 0 else current_price,
+                    "Low": low_price if low_price > 0 else current_price,
+                    "Volume": volume if volume > 0 else 1000.0
                 }
             return self.get_yahoo_backup_price(ticker)
         except:
@@ -213,7 +221,7 @@ with st.expander("📊 현재 업종 수급 순위 보기"):
 
 # 전광판 데이터 연산 루프
 summary_rows = []
-total_accumulated_ticks = [] # 현재 시전 상태 분석용
+total_accumulated_ticks = [] 
 
 for ticker in flat_ticker_list:
     name = ticker_to_name_map[ticker]
@@ -253,7 +261,6 @@ for ticker in flat_ticker_list:
             st.session_state.multi_market_data[ticker] = pd.concat([st.session_state.multi_market_data[ticker], new_df])
             st.session_state.multi_market_data[ticker] = st.session_state.multi_market_data[ticker].loc[~st.session_state.multi_market_data[ticker].index.duplicated(keep='last')].tail(15)
 
-    # 현재 시전 깊이(데이터 수량) 수집
     total_accumulated_ticks.append(len(st.session_state.multi_market_data[ticker]))
 
     calculated_df = process_quant_signals(st.session_state.multi_market_data[ticker].copy())
@@ -283,9 +290,8 @@ for ticker in flat_ticker_list:
 summary_df = pd.DataFrame(summary_rows)
 summary_df = summary_df.sort_values(by=['신호가중치', '업종순위가중치']).reset_index(drop=True)
 
-# --- 🌟 [현재 시전 평가 전광판 모듈] ---
+# --- 현재 시전 평가 전광판 모듈 ---
 avg_ticks = np.mean(total_accumulated_ticks) if total_accumulated_ticks else 5
-# 최대 15개 샘플링 기준 데이터 성숙도 연산 (5개 기본제공 = 33%)
 data_maturity = min(100, int((avg_ticks / 15.0) * 100))
 
 if data_maturity <= 40:
