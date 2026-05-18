@@ -25,7 +25,6 @@ class KoreaInvestmentAPI:
         self.app_secret = APP_SECRET
 
     def get_yahoo_backup_price(self, ticker):
-        """ 한투 서버 지연 시 작동하는 백업 시세 엔진 (원화 가격 왜곡 보정 로직 내장) """
         try:
             clean_ticker = str(ticker).strip()
             yahoo_ticker = f"{clean_ticker}.KQ"
@@ -51,7 +50,6 @@ class KoreaInvestmentAPI:
                         close_p = closes[-1] if closes else 0.0
                     
                     final_close = float(close_p)
-                    # 🛠️ 해외 피드 단위 누락으로 인한 가격 차이 교정 (현재가가 1000원 미만으로 찢어지는 현상 방어)
                     if final_close > 0 and final_close < 1000:
                         final_close = final_close * 1350.0  
                     
@@ -139,7 +137,6 @@ STOCK_NAME_MAP = {
 }
 
 def get_stock_name(ticker):
-    """ 코드를 한글 종목명으로 치환 (등록되지 않은 종목은 예외 방어 처리) """
     return STOCK_NAME_MAP.get(ticker, f"종목({ticker})")
 
 # =================================================================
@@ -184,9 +181,10 @@ def process_quant_signals(df):
     return df
 
 # =================================================================
-# 🖥️ 웹 대시보드 인터페이스 영역
+# 🖥️ 웹 대시보드 인터페이스 영역 (모의 모바일 뷰포트 최적화)
 # =================================================================
-st.set_page_config(page_title="초고속 실시간 스캐너", layout="centered")
+# 기본 좌우 여백을 줄여 모바일 화면 폭을 최대한 확보합니다.
+st.set_page_config(page_title="실시간 스캐너", layout="centered")
 
 if "custom_stock_pool" not in st.session_state:
     st.session_state.custom_stock_pool = ["005930", "000660", "005380", "000270", "035420", "068270"]
@@ -194,17 +192,17 @@ if "custom_stock_pool" not in st.session_state:
 if "multi_market_data" not in st.session_state:
     st.session_state.multi_market_data = {}
 
-# 🛠️ [사이드바] 종목 번호 복사·붙여넣기 멀티 대량 입력창
-st.sidebar.markdown("### 📋 종목 번호 멀티 입력")
-st.sidebar.caption("복사한 종목 코드들을 공백, 줄바꿈 또는 쉼표로 구분해 한 번에 등록하세요.")
+# 🛠️ [사이드바] 모바일 터치 최적화 입력단
+st.sidebar.markdown("### 📋 종목 번호 입력")
+st.sidebar.caption("번호를 복사해 붙여넣으세요 (공백/쉼표 구분)")
 
 raw_input_tickers = st.sidebar.text_area(
-    "종목번호 여러 개 입력", 
-    placeholder="예시: 005930, 000660, 005380",
-    height=110
+    "종목코드 멀티 입력", 
+    placeholder="예: 005930 000660",
+    height=90
 )
 
-if st.sidebar.button("⚡ 일괄 등록 및 동기화", use_container_width=True):
+if st.sidebar.button("⚡ 종목 등록 및 동기화", use_container_width=True):
     if raw_input_tickers.strip():
         parsed_tickers = raw_input_tickers.replace(",", " ").replace("\n", " ").split()
         clean_tickers = [t.strip() for t in parsed_tickers if len(t.strip()) == 6 and t.strip().isdigit()]
@@ -212,17 +210,17 @@ if st.sidebar.button("⚡ 일괄 등록 및 동기화", use_container_width=True
         if clean_tickers:
             updated_pool = list(set(st.session_state.custom_stock_pool + clean_tickers))
             st.session_state.custom_stock_pool = updated_pool
-            st.sidebar.success(f"✅ {len(clean_tickers)}개 종목풀 추가 완료!")
+            st.sidebar.success(f"추가 완료!")
             st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.write(f"🔍 현재 감시 목록 ({len(st.session_state.custom_stock_pool)}개)")
+st.sidebar.write(f"🔍 감시 목록 ({len(st.session_state.custom_stock_pool)}개)")
 
-# 사이드바 리스트 표시단도 직관적인 한글 종목명으로 출력
+# 사이드바 리스트 삭제 버튼 터치 영역 최적화
 delete_target = None
 for tk in list(st.session_state.custom_stock_pool):
-    col1, col2 = st.sidebar.columns([3, 1])
-    col1.caption(f"🔹 {get_stock_name(tk)}")
+    col1, col2 = st.sidebar.columns([4, 1])
+    col1.caption(f"▪️ {get_stock_name(tk)}")
     if col2.button("❌", key=f"del_{tk}"):
         delete_target = tk
 
@@ -232,14 +230,14 @@ if delete_target:
         del st.session_state.multi_market_data[delete_target]
     st.rerun()
 
-# 🏹 메인 모니터링 전광판 
-st.markdown("### 🏹 전시장 통합 수급 돌파 스캐너 (TOP 20)")
-st.caption(f"⏱️ 실시간 한글 종목명 마스터 모드 가동 중... ({datetime.now().strftime('%H:%M:%S')})")
+# 🏹 메인 모니터링 전광판 (모바일 가독성 증폭 버전)
+st.markdown("### 🏹 실시간 수급 돌파 스캐너")
+st.caption(f"⏱️ 자동 갱신 중... ({datetime.now().strftime('%H:%M:%S')})")
 
 api = KoreaInvestmentAPI()
 current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-if st.button("🔑 데이터 버퍼 및 캐시 전체 초기화", use_container_width=True):
+if st.button("🔑 버퍼 및 캐시 비우기", use_container_width=True):
     st.session_state.multi_market_data = {}
     st.rerun()
 
@@ -293,7 +291,7 @@ for ticker in st.session_state.custom_stock_pool:
 
 st.markdown("---")
 
-# 실시간 시세 보드 정렬 및 렌더링
+# 실시간 시세 보드 정렬 및 렌더링 (모바일 스크롤/레이아웃 최적화)
 if summary_rows:
     summary_df = pd.DataFrame(summary_rows)
     summary_df = summary_df.sort_values(
@@ -309,27 +307,32 @@ if summary_rows:
         sig = row["현재 타이밍 신호"]
         rank_idx = index + 1
         
-        # 🌟 헤더를 한글 종목명 우선 구조로 시인성 업그레이드
+        # 📱 모바일 가로폭 폭망 방지용 수직 컴팩트 블록 디자인
         card_header = f"**[{rank_idx}위] {row['종목명']}** ({row['종목코드']})"
-        card_body = f"💰 **현재가**: {row['현재가']:,}원 ｜ 📈 **RSI**: {row['RSI']} ｜ 📊 **거래대금**: {int(row['실시간거래대금']/100000000):,}억\n\n🍏 **수급선**: {row['수급선']:,}원 ｜ 🛑 **저항선**: {row['저항선']:,}원"
+        
+        card_body = (
+            f"💵 **현재가**: {row['현재가']:,}원\n\n"
+            f"🔥 **RSI**: {row['RSI']} | 📊 **대금**: {int(row['실시간거래대금']/100000000):,}억\n\n"
+            f"🍏 **수급**: {row['수급선']:,}원 | 🛑 **저항**: {row['저항선']:,}원"
+        )
         
         if sig == "🔥 매수 타점!!":
             with st.container():
-                st.error(f"🎯 **{sig}** ｜ {card_header}")
+                st.error(f"🎯 **{sig}**\n\n{card_header}")
                 st.markdown(card_body)
                 st.markdown("---")
         elif sig == "🚨 익절/청산":
             with st.container():
-                st.warning(f"🚨 **{sig}** ｜ {card_header}")
+                st.warning(f"🚨 **{sig}**\n\n{card_header}")
                 st.markdown(card_body)
                 st.markdown("---")
         else:
             with st.container():
-                st.success(f"🍏 **{sig}** ｜ {card_header}")
+                st.success(f"🍏 **{sig}**\n\n{card_header}")
                 st.markdown(card_body)
                 st.markdown("---")
 else:
-    st.info("💡 사이드바에 종목 번호들을 등록하시면 즉시 실시간 분석이 시작됩니다.")
+    st.info("💡 종목 번호들을 등록하시면 분석이 시작됩니다.")
 
 # =================================================================
 # 🔄 초단위 자동 인코딩 무한루프 엔진 (1.2초 리프레시 인터벌)
