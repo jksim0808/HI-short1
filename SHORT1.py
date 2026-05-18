@@ -43,7 +43,7 @@ class KoreaInvestmentAPI:
             return None
 
     def get_yahoo_backup_price(self, ticker):
-        """[야후 파이낸스 우회 엔진] 코스피/코스닥 스마트 쿼리 적용"""
+        """[야후 파이낸스 우회 엔진] 코스피/코스닥 스마트 쿼리 및 종목명 추출 기능 통합"""
         try:
             clean_ticker = str(ticker).strip()
             
@@ -65,6 +65,10 @@ class KoreaInvestmentAPI:
                 if result:
                     meta = result[0].get("meta", {})
                     close_p = meta.get("regularMarketPrice")
+                    
+                    # 💡 글로벌 정보에서 실제 종목명 파싱 (없으면 코드 번호 반환)
+                    stock_name = meta.get("shortName", f"종목 [{clean_ticker}]")
+                    
                     if close_p is None:
                         indicators = result[0].get("indicators", {}).get("quote", [{}])[0]
                         closes = [c for c in indicators.get("close", []) if c is not None]
@@ -75,16 +79,22 @@ class KoreaInvestmentAPI:
                             "Close": float(close_p),
                             "High": float(close_p * 1.002),
                             "Low": float(close_p * 0.998),
-                            "Volume": float(meta.get("regularMarketVolume", 150000.0))
+                            "Volume": float(meta.get("regularMarketVolume", 150000.0)),
+                            "Name": stock_name
                         }
             return None
         except:
             return None
 
     def get_realtime_price(self, ticker):
+        """실시간 시세 취득 및 우회 파이프라인 결합"""
+        # 기본적으로 야후 백업 정보에서 실시간 이름 정보를 먼저 획득
+        backup_info = self.get_yahoo_backup_price(ticker)
+        stock_name = backup_info["Name"] if backup_info else f"종목 [{ticker}]"
+
         access_token = self.get_access_token()
         if not access_token:
-            return self.get_yahoo_backup_price(ticker)
+            return backup_info
             
         url = f"{self.base_url}/uapi/domestic-stock/v1/quoting/inquire-price"
         headers = {
@@ -98,20 +108,21 @@ class KoreaInvestmentAPI:
         try:
             response = requests.get(url, headers=headers, params=params)
             if response.status_code == 404:
-                return self.get_yahoo_backup_price(ticker)
+                return backup_info
             if response.status_code == 200:
                 res_data = response.json().get("output", {})
                 if not res_data or res_data.get("stck_prpr") == "":
-                    return self.get_yahoo_backup_price(ticker)
+                    return backup_info
                 return {
                     "Close": float(res_data.get("stck_prpr", 0)),
                     "High": float(res_data.get("stck_hgpr", 0)),
                     "Low": float(res_data.get("stck_lwpr", 0)),
-                    "Volume": float(res_data.get("accl_tr_vol", 0))
+                    "Volume": float(res_data.get("accl_tr_vol", 0)),
+                    "Name": stock_name
                 }
-            return self.get_yahoo_backup_price(ticker)
+            return backup_info
         except:
-            return self.get_yahoo_backup_price(ticker)
+            return backup_info
 
 # --- 2단계: 기술적 지표 및 퀀트 특성 계산 파이프라인 ---
 def calculate_indicators(df):
@@ -146,7 +157,7 @@ def calculate_indicators(df):
 st.set_page_config(page_title="한투 우회 단타기", layout="wide")
 
 st.title("🏹 한국투자증권 모의투자 시스템 우회형 실시간 단타 대시보드")
-st.warning("⚠️ 시스템 보안 안내: 시장 자동 교차 판별 엔진(.KS / .KQ) 및 퀀트 매매 타점 알고리즘이 가동 중입니다.")
+st.warning("⚠️ 시스템 보안 안내: 시장 자동 교차 판별 엔진 및 퀀트 매매 타점 알고리즘이 가동 중입니다.")
 
 # 세션 관리 상태 유지
 if "stock_history" not in st.session_state or st.session_state.stock_history is None:
@@ -180,8 +191,9 @@ tick_data = api.get_realtime_price(ticker_input)
 
 if tick_data and tick_data["Close"] > 0:
     base_price = tick_data["Close"]
+    display_name = tick_data["Name"] # 💡 추출된 실제 종목명 정의
     
-    # 첫 진입 시 5분 데이터 자동 빌드업 빌더 (차트 및 표 표출 무조건 보장)
+    # [💡 실시간 정렬 보완] 첫 진입 시 현재 시간을 기준으로 정확하게 5분 전까지 빌드업
     if len(st.session_state.stock_history) == 0:
         init_rows = []
         now_time = datetime.now()
@@ -197,7 +209,7 @@ if tick_data and tick_data["Close"] > 0:
             })
         st.session_state.stock_history = pd.DataFrame(init_rows).set_index("Time")
 
-    # 버튼 클릭 시 실시간 시세 한 줄씩 누적 축적
+    # 버튼 클릭 시 '현재 시각 정확한 한국 타임스탬프'로 로깅 추가
     if st.sidebar.button("🔄 실시간 시세 갱신 및 타점 연산"):
         new_row = pd.DataFrame([{
             "Close": tick_data["Close"],
@@ -223,7 +235,9 @@ if tick_data and tick_data["Close"] > 0:
     is_buy_signal = cond_vwap_breakout and cond_resistance_break and cond_volume_pump and (latest['RSI'] < 78)
     is_sell_signal = latest['RSI'] > 82  
     
-    # 전광판 위젯 출력
+    # 💡 상단 전광판 타이틀에 종목번호 대신 실시간 매핑된 종목명(display_name) 표출
+    st.subheader(f"📈 {display_name} 실시간 수급 현황")
+
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric(label="현재 체결가", value=f"{int(latest['Close']):,} 원", delta=f"{int(latest['Close'] - prev_close):,} 원")
@@ -236,14 +250,14 @@ if tick_data and tick_data["Close"] > 0:
         
     st.markdown("---")
     
-    # 신호등 알림 시스템
+    # 💡 신호등 알림창 내부에 종목명(display_name) 바인딩 완료
     if is_buy_signal:
-        st.error(f"🔥 [매수 타점 포착] {ticker_input} - 수급선(VWAP) 및 전고점 동시 돌파 수급 집중!")
+        st.error(f"🔥 [매수 타점 포착] {display_name} - 수급선(VWAP) 및 전고점 동시 돌파!")
         st.balloons()
     elif is_sell_signal:
-        st.info(f"🚨 [과매수 청산 신호] {ticker_input} - RSI {int(latest['RSI'])} 돌파. 단기 오버슈팅에 따른 익절 타점!")
+        st.info(f"🚨 [과매수 청산 신호] {display_name} - RSI {int(latest['RSI'])} 돌파. 단기 오버슈팅에 따른 익절 타점!")
     else:
-        st.success(f"🟢 [실시간 파이프라인 분석 중] 현재 {ticker_input} 종목 수급선 돌파 추적 관망 대기 중.")
+        st.success(f"🟢 [실시간 분석 중] 현재 {display_name} 종목 수급선 돌파 추적 관망 대기 중.")
         
     # 대시보드 그래프 드로잉
     st.subheader("📊 주가 및 단기 수급선(VWAP) 추이 분석")
