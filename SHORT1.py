@@ -2,137 +2,75 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
+from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import time
+import re
 
 # =================================================================
-# 🔑 [모의투자 계좌 설정] Streamlit Secrets 내부 금고 연동
+# 🏦 네이버 금융 실시간 웹 스크래핑 엔진 (한투/야후 대안 완벽 대체)
 # =================================================================
-APP_KEY = st.secrets["HANTU_APP_KEY"]
-APP_SECRET = st.secrets["HANTU_APP_SECRET"]
-MOCK_FLAG = True  # 👈 모의투자 true일 때 한투 전용 tr_id가 자동 스위칭됩니다.
-
-# =================================================================
-# 🏦 한국투자증권 API & 야후 파이낸스 실시간 정밀 연동 엔진
-# =================================================================
-class KoreaInvestmentAPI:
+class NaverFinanceAPI:
     def __init__(self):
-        if MOCK_FLAG:
-            self.base_url = "https://openapivts.koreainvestment.com:29443"
-        else:
-            self.base_url = "https://openapi.koreainvestment.com:9443"
-        self.app_key = APP_KEY
-        self.app_secret = APP_SECRET
-
-    def get_yahoo_backup_price(self, ticker):
-        """ 한투 API 장애 또는 세션 끊김 시, 야후 파이낸스 실시간 체결가 피드를 정확히 파싱 """
-        try:
-            clean_ticker = str(ticker).strip()
-            # 1단계: 코스닥 우선 탐색
-            yahoo_ticker = f"{clean_ticker}.KQ"
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1m&range=1d"
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-            res = requests.get(url, headers=headers, timeout=2.0)
-            
-            # 2단계: 코스닥 실패 시 코스피 종목 탐색
-            if res.status_code != 200 or "result" not in res.json().get("chart", {}):
-                yahoo_ticker = f"{clean_ticker}.KS"
-                url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1m&range=1d"
-                res = requests.get(url, headers=headers, timeout=2.0)
-                
-            if res.status_code == 200:
-                json_data = res.json()
-                result = json_data.get("chart", {}).get("result", [])
-                if result:
-                    meta = result[0].get("meta", {})
-                    # 과거 종가가 아닌 '현재 실시간 체결가' 데이터 취득
-                    live_price = meta.get("regularMarketPrice")
-                    
-                    # 만약 meta에 실시간가가 비어있다면, 1분봉의 가장 최근 종가(Close) 추적
-                    if live_price is None or float(live_price) <= 0:
-                        indicators = result[0].get("indicators", {}).get("quote", [{}])[0]
-                        closes = [c for c in indicators.get("close", []) if c is not None and c > 0]
-                        if closes:
-                            live_price = closes[-1]
-                    
-                    if live_price and float(live_price) > 0:
-                        final_p = float(live_price)
-                        return {
-                            "Close": final_p,
-                            "High": float(meta.get("fiftyTwoWeekHigh", final_p * 1.002)),
-                            "Low": float(meta.get("fiftyTwoWeekLow", final_p * 0.998)),
-                            "Volume": float(meta.get("regularMarketVolume", 250000.0))
-                        }
-            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
-        except:
-            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
 
     def get_realtime_price(self, ticker):
-        """ 한국투자증권 실시간 호가/체결 데이터 수신 구문 """
-        access_token = self.get_access_token()
-        if not access_token:
-            return self.get_yahoo_backup_price(ticker)
+        """ 네이버 금융 실시간 주가창에서 현재가, 고가, 저가, 거래량을 정밀 추출 """
+        try:
+            clean_ticker = str(ticker).strip()
+            url = f"https://finance.naver.com/item/main.naver?code={clean_ticker}"
+            res = requests.get(url, headers=self.headers, timeout=2.0)
             
-        url = f"{self.base_url}/uapi/domestic-stock/v1/quoting/inquire-price"
-        
-        # 🛠️ 모의투자와 실운영 계좌간의 실시간 조회 전용 tr_id 분기 처리 (정밀화)
-        target_tr_id = "VTST01010200" if MOCK_FLAG else "FHKST01010200"
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {access_token}",
-            "appkey": self.app_key,
-            "appsecret": self.app_secret,
-            "tr_id": target_tr_id 
-        }
-        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker}
-        try:
-            response = requests.get(url, headers=headers, params=params)
-            if response.status_code == 200:
-                res_data = response.json().get("output", {})
-                if not res_data or res_data.get("stck_prpr") == "" or res_data.get("stck_prpr") is None:
-                    return self.get_yahoo_backup_price(ticker)
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, "html.parser")
                 
-                # 수신된 문자열 데이터에서 부호 및 공백을 완벽히 정제하여 순수 정수 변환
-                current_price = float(str(res_data.get("stck_prpr")).strip().replace("-", "").replace("+", ""))
-                high_price = float(str(res_data.get("stck_hgpr", current_price)).strip().replace("-", "").replace("+", ""))
-                low_price = float(str(res_data.get("stck_lwpr", current_price)).strip().replace("-", "").replace("+", ""))
-                volume = float(str(res_data.get("accl_tr_vol", 0)).strip())
+                # 1. 현재가 추출 (blind 태그 내부의 텍스트 파싱)
+                today_div = soup.find("div", {"class": "today"})
+                if not today_div:
+                    return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
                 
-                if current_price <= 0:
-                    return self.get_yahoo_backup_price(ticker)
+                blind_now = today_div.find("span", {"class": "blind"})
+                current_price = float(re.sub(r'[^\d]', '', blind_now.text))
                 
-                return {
-                    "Close": current_price,
-                    "High": high_price if high_price > 0 else current_price,
-                    "Low": low_price if low_price > 0 else current_price,
-                    "Volume": volume if volume > 0 else 1000.0
-                }
-            return self.get_yahoo_backup_price(ticker)
-        except:
-            return self.get_yahoo_backup_price(ticker)
+                # 2. 고가, 저가, 거래량 추출 (table.no_info 태그 내부 파싱)
+                no_info_table = soup.find("table", {"class": "no_info"})
+                high_price = current_price
+                low_price = current_price
+                volume = 150000.0  # 기본값 방어선
+                
+                if no_info_table:
+                    tds = no_info_table.find_all("td")
+                    for td in tds:
+                        blind_span = td.find("span", {"class": "blind"})
+                        if not blind_span:
+                            continue
+                        
+                        text_val = blind_span.text.strip()
+                        parent_text = td.text
+                        
+                        # 고가 판별
+                        if "고가" in parent_text and "52주" not in parent_text:
+                            high_price = float(re.sub(r'[^\d]', '', text_val))
+                        # 저가 판별
+                        elif "저가" in parent_text and "52주" not in parent_text:
+                            low_price = float(re.sub(r'[^\d]', '', text_val))
+                        # 거래량 판별
+                        elif "거래량" in parent_text:
+                            volume = float(re.sub(r'[^\d]', '', text_val))
 
-    def get_access_token(self):
-        if "api_access_token" in st.session_state and st.session_state.api_access_token:
-            return st.session_state.api_access_token
-        now = datetime.now()
-        if "last_token_request_time" in st.session_state and st.session_state.last_token_request_time:
-            if now - st.session_state.last_token_request_time < timedelta(minutes=1):
-                return None
-        st.session_state.last_token_request_time = now
-        try:
-            # 토큰 발급 주소도 계좌 모드에 맞추어 자동 매핑
-            url = f"{self.base_url}/oauth2/tokenP"
-            headers = {"content-type": "application/json"}
-            data = {"grant_type": "client_credentials", "appkey": self.app_key, "appsecret": self.app_secret}
-            response = requests.post(url, headers=headers, json=data)
-            if response.status_code == 200:
-                token = response.json().get("access_token")
-                st.session_state.api_access_token = token
-                return token
-            return None
+                if current_price > 0:
+                    return {
+                        "Close": current_price,
+                        "High": high_price if high_price > 0 else current_price,
+                        "Low": low_price if low_price > 0 else current_price,
+                        "Volume": volume if volume > 0 else 1000.0
+                    }
+                    
+            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
         except:
-            return None
+            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
 
 # =================================================================
 # 🏷️ 국내 주요 종목 코드 마스터 매핑 딕셔너리
@@ -191,7 +129,7 @@ def process_quant_signals(df):
     return df
 
 # =================================================================
-# 🖥️ 웹 대시보드 인터페이스 영역 (모바일 반응형 완결판)
+# 🖥️ 웹 대시보드 인터페이스 영역 (모바일 반응형 최적화)
 # =================================================================
 st.set_page_config(page_title="실시간 스캐너", layout="centered")
 
@@ -239,13 +177,13 @@ if delete_target:
     st.rerun()
 
 # 🏹 메인 모니터링 전광판
-st.markdown("### 🏹 실시간 수급 돌파 스캐너")
-st.caption(f"⏱️ 자동 갱신 중... ({datetime.now().strftime('%H:%M:%S')})")
+st.markdown("### 🏹 실시간 네이버 수급 스캐너")
+st.caption(f"⏱️ 네이버 금융 연동 자동 갱신 중... ({datetime.now().strftime('%H:%M:%S')})")
 
-api = KoreaInvestmentAPI()
+api = NaverFinanceAPI()
 current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-if st.button("🔑 버퍼 및 캐시 비우기 (시세 왜곡 시 클릭)", use_container_width=True):
+if st.button("🔑 버퍼 및 캐시 비우기 (시세 동기화 세트)", use_container_width=True):
     st.session_state.multi_market_data = {}
     st.rerun()
 
@@ -253,7 +191,7 @@ summary_rows = []
 
 # 멀티 종목 실시간 연산 체인 가동
 for ticker in st.session_state.custom_stock_pool:
-    # 최초 진입 시 실시간 시세를 초기 주춧돌(Base) 삼아 버퍼 설정
+    # 최초 진입 시 네이버 실시간 주가를 기반으로 타임 프레임 버퍼 생성
     if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
         raw_price = api.get_realtime_price(ticker)
         init_rows = []
@@ -269,7 +207,7 @@ for ticker in st.session_state.custom_stock_pool:
             })
         st.session_state.multi_market_data[ticker] = pd.DataFrame(init_rows, index=init_times)
 
-    # 매 리프레시 루프마다 실시간 대조군 주입
+    # 매 리프레시 루프마다 네이버 최신가 주입
     live_tick = api.get_realtime_price(ticker)
     if live_tick["Close"] > 0:
         new_df = pd.DataFrame([{"Close": live_tick["Close"], "High": live_tick["High"], "Low": live_tick["Low"], "Volume": live_tick["Volume"]}], index=[pd.to_datetime(current_time_str)])
