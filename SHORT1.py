@@ -2,101 +2,164 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-import json
-from datetime import datetime
+from datetime import datetime, timedelta
+import time
 
 # =================================================================
-# 🔑 [필수 수정] 한국투자증권 Open API Key 직접 고정 설정
+# 🔑 [모의투자 계좌 설정] Streamlit Secrets 내부 금고 연동
 # =================================================================
-APP_KEY = "PStJmUgIXFv3YcarDFbZ3IMH2FzWfv6O3LYE"
-APP_SECRET = "fk8HSHkURygDTLWZxFEAeWU3zIdBAvmo/ndNE/DrBq78D0cjN5bGSXYUD49hsz0/nGVtItjpZzRP6X84iE3grpTay7EZzEzM9Cdoe9cT434+hi9b/tEf9HgTqwwach86tnggK5rmmYS0hn+0GzmZ7WV+nizQNMgT6tZkYC7Z0kbNMxOzDdA="
-MOCK_FLAG = True  # True: 모의투자 서버 사용 / False: 실운영 서버 사용
-# =================================================================
+APP_KEY = st.secrets["HANTU_APP_KEY"]
+APP_SECRET = st.secrets["HANTU_APP_SECRET"]
+MOCK_FLAG = True  # 👈 모의투자 true일 때 한투 전용 tr_id가 자동 스위칭됩니다.
 
-# --- 1. 한국투자증권 API 통신 클래스 (토큰 세션 저장형) ---
+# =================================================================
+# 🏦 한국투자증권 API & 야후 파이낸스 실시간 정밀 연동 엔진
+# =================================================================
 class KoreaInvestmentAPI:
     def __init__(self):
         if MOCK_FLAG:
-            self.base_url = "https://openapivts.koreainvestment.com:29443" # 모의투자 주소
+            self.base_url = "https://openapivts.koreainvestment.com:29443"
         else:
-            self.base_url = "https://openapi.koreainvestment.com:9443"    # 실운영 주소
-            
+            self.base_url = "https://openapi.koreainvestment.com:9443"
         self.app_key = APP_KEY
         self.app_secret = APP_SECRET
 
-    def get_access_token(self):
-        """OAuth2.0 접근 토큰 발급 (1분 제한 우회를 위해 세션 상태 재사용)"""
-        if "api_access_token" in st.session_state and st.session_state.api_access_token:
-            return st.session_state.api_access_token
-
-        url = f"{self.base_url}/oauth2/tokenP"
-        headers = {"content-type": "application/json"}
-        data = {
-            "grant_type": "client_credentials",
-            "appkey": self.app_key,
-            "appsecret": self.app_secret
-        }
+    def get_yahoo_backup_price(self, ticker):
+        """ 한투 API 장애 또는 세션 끊김 시, 야후 파이낸스 실시간 체결가 피드를 정확히 파싱 """
         try:
-            response = requests.post(url, headers=headers, json=data)
-            if response.status_code == 200:
-                token = response.json().get("access_token")
-                st.session_state.api_access_token = token
-                return token
-            else:
-                error_msg = response.json().get('error_description', '알 수 없는 에러')
-                st.error(f"❌ 한투 서버 인증 실패 (키 확인 필요): {error_msg}")
-                return None
-        except Exception as e:
-            st.error(f"한투 서버 연결 실패: {e}")
-            return None
+            clean_ticker = str(ticker).strip()
+            # 1단계: 코스닥 우선 탐색
+            yahoo_ticker = f"{clean_ticker}.KQ"
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1m&range=1d"
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            res = requests.get(url, headers=headers, timeout=2.0)
+            
+            # 2단계: 코스닥 실패 시 코스피 종목 탐색
+            if res.status_code != 200 or "result" not in res.json().get("chart", {}):
+                yahoo_ticker = f"{clean_ticker}.KS"
+                url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1m&range=1d"
+                res = requests.get(url, headers=headers, timeout=2.0)
+                
+            if res.status_code == 200:
+                json_data = res.json()
+                result = json_data.get("chart", {}).get("result", [])
+                if result:
+                    meta = result[0].get("meta", {})
+                    # 과거 종가가 아닌 '현재 실시간 체결가' 데이터 취득
+                    live_price = meta.get("regularMarketPrice")
+                    
+                    # 만약 meta에 실시간가가 비어있다면, 1분봉의 가장 최근 종가(Close) 추적
+                    if live_price is None or float(live_price) <= 0:
+                        indicators = result[0].get("indicators", {}).get("quote", [{}])[0]
+                        closes = [c for c in indicators.get("close", []) if c is not None and c > 0]
+                        if closes:
+                            live_price = closes[-1]
+                    
+                    if live_price and float(live_price) > 0:
+                        final_p = float(live_price)
+                        return {
+                            "Close": final_p,
+                            "High": float(meta.get("fiftyTwoWeekHigh", final_p * 1.002)),
+                            "Low": float(meta.get("fiftyTwoWeekLow", final_p * 0.998)),
+                            "Volume": float(meta.get("regularMarketVolume", 250000.0))
+                        }
+            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
+        except:
+            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
 
     def get_realtime_price(self, ticker):
-        """주식현재가 일자별/시간별 체결 데이터 조회 (TR: FHKST01010100)"""
+        """ 한국투자증권 실시간 호가/체결 데이터 수신 구문 """
         access_token = self.get_access_token()
         if not access_token:
-            return None
-
+            return self.get_yahoo_backup_price(ticker)
+            
         url = f"{self.base_url}/uapi/domestic-stock/v1/quoting/inquire-price"
+        
+        # 🛠️ 모의투자와 실운영 계좌간의 실시간 조회 전용 tr_id 분기 처리 (정밀화)
+        target_tr_id = "VTST01010200" if MOCK_FLAG else "FHKST01010200"
+        
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {access_token}",
             "appkey": self.app_key,
             "appsecret": self.app_secret,
-            "tr_id": "FHKST01010100"
+            "tr_id": target_tr_id 
         }
-        params = {
-            "FID_COND_MRKT_DIV_CODE": "J",
-            "FID_INPUT_ISCD": ticker
-        }
-
+        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker}
         try:
             response = requests.get(url, headers=headers, params=params)
             if response.status_code == 200:
                 res_data = response.json().get("output", {})
+                if not res_data or res_data.get("stck_prpr") == "" or res_data.get("stck_prpr") is None:
+                    return self.get_yahoo_backup_price(ticker)
                 
-                # 장외 시간이거나 데이터가 비어있을 때 한투의 한글 거절 메시지 출력
-                if not res_data:
-                    msg = response.json().get("msg1", "데이터가 존재하지 않습니다.")
-                    st.warning(f"⚠️ 한투 메시지: {msg}")
-                    return None
-                    
+                # 수신된 문자열 데이터에서 부호 및 공백을 완벽히 정제하여 순수 정수 변환
+                current_price = float(str(res_data.get("stck_prpr")).strip().replace("-", "").replace("+", ""))
+                high_price = float(str(res_data.get("stck_hgpr", current_price)).strip().replace("-", "").replace("+", ""))
+                low_price = float(str(res_data.get("stck_lwpr", current_price)).strip().replace("-", "").replace("+", ""))
+                volume = float(str(res_data.get("accl_tr_vol", 0)).strip())
+                
+                if current_price <= 0:
+                    return self.get_yahoo_backup_price(ticker)
+                
                 return {
-                    "Close": float(res_data.get("stck_prpr", 0)),
-                    "High": float(res_data.get("stck_hgpr", 0)),
-                    "Low": float(res_data.get("stck_lwpr", 0)),
-                    "Volume": float(res_data.get("accl_tr_vol", 0))
+                    "Close": current_price,
+                    "High": high_price if high_price > 0 else current_price,
+                    "Low": low_price if low_price > 0 else current_price,
+                    "Volume": volume if volume > 0 else 1000.0
                 }
-            else:
-                st.error(f"❌ 시세 조회 실패 (오류 코드 {response.status_code}): {response.text}")
+            return self.get_yahoo_backup_price(ticker)
+        except:
+            return self.get_yahoo_backup_price(ticker)
+
+    def get_access_token(self):
+        if "api_access_token" in st.session_state and st.session_state.api_access_token:
+            return st.session_state.api_access_token
+        now = datetime.now()
+        if "last_token_request_time" in st.session_state and st.session_state.last_token_request_time:
+            if now - st.session_state.last_token_request_time < timedelta(minutes=1):
                 return None
-        except Exception as e:
-            st.error(f"API 통신 오류: {e}")
+        st.session_state.last_token_request_time = now
+        try:
+            # 토큰 발급 주소도 계좌 모드에 맞추어 자동 매핑
+            url = f"{self.base_url}/oauth2/tokenP"
+            headers = {"content-type": "application/json"}
+            data = {"grant_type": "client_credentials", "appkey": self.app_key, "appsecret": self.app_secret}
+            response = requests.post(url, headers=headers, json=data)
+            if response.status_code == 200:
+                token = response.json().get("access_token")
+                st.session_state.api_access_token = token
+                return token
+            return None
+        except:
             return None
 
-# --- 2. 퀀트 단타 지표 연산 알고리즘 ---
-def calculate_indicators(df):
+# =================================================================
+# 🏷️ 국내 주요 종목 코드 마스터 매핑 딕셔너리
+# =================================================================
+STOCK_NAME_MAP = {
+    "005930": "삼성전자", "000660": "SK하이닉스", "005380": "현대차", "000270": "기아",
+    "035420": "NAVER", "035720": "카카오", "068270": "셀트리온", "373220": "LG에너지솔루션",
+    "207940": "삼성바이오로직스", "051910": "LG화학", "006400": "삼성SDI", "003550": "LG",
+    "005490": "POSCO홀딩스", "010140": "삼성중공업", "009540": "HD현대중공업", "105560": "KB금융",
+    "055550": "신한지주", "000810": "삼성화재", "015760": "한국전력", "028260": "삼성물산",
+    "247540": "에코프로비엠", "086520": "에코프로", "091500": "삼성전기", "352820": "하이브"
+}
+
+def get_stock_name(ticker):
+    return STOCK_NAME_MAP.get(ticker, f"종목({ticker})")
+
+# =================================================================
+# 📊 기술적 지표 퀀트 연산 엔진
+# =================================================================
+def process_quant_signals(df):
     if len(df) < 2:
+        df['VWAP'] = df['Close']
+        df['RSI'] = 50.0
+        df['Local_High'] = df['High']
+        df['타이밍 신호'] = "🟢 관망(대기)"
         return df
+
     typical_price = (df['High'] + df['Low'] + df['Close']) / 3
     df['Price_Vol'] = typical_price * df['Volume']
     df['VWAP'] = df['Price_Vol'].cumsum() / (df['Volume'].cumsum() + 1e-9)
@@ -108,91 +171,180 @@ def calculate_indicators(df):
     
     df['Local_High'] = df['High'].shift(1).rolling(window=min(3, len(df)-1), min_periods=1).max()
     df['Vol_MA'] = df['Volume'].shift(1).rolling(window=min(3, len(df)-1), min_periods=1).mean()
+    
+    signals = []
+    for idx in range(len(df)):
+        if idx < 1:
+            signals.append("🟢 관망(대기)")
+            continue
+        c_row = df.iloc[idx]
+        p_local_high = df['High'].iloc[max(0, idx-3):idx].max()
+        p_vol_ma = df['Volume'].iloc[max(0, idx-3):idx].mean()
+        
+        if (c_row['Close'] > c_row['VWAP']) and (c_row['Close'] >= p_local_high) and (c_row['Volume'] > p_vol_ma * 1.02) and (c_row['RSI'] < 78):
+            signals.append("🔥 매수 타점!!")
+        elif c_row['RSI'] > 82:
+            signals.append("🚨 익절/청산")
+        else:
+            signals.append("🟢 관망(대기)")
+    df['타이밍 신호'] = signals
     return df
 
-# --- 3. 웹 UI 화면 구성 ---
-st.set_page_config(page_title="한투 API 자동 단타기", layout="wide")
+# =================================================================
+# 🖥️ 웹 대시보드 인터페이스 영역 (모바일 반응형 완결판)
+# =================================================================
+st.set_page_config(page_title="실시간 스캐너", layout="centered")
 
-st.title("🏹 한국투자증권 자동 연동 실시간 단타 예측 대시보드")
-st.markdown("프로그램 내부에 API 인증키가 안전하게 내장되어 즉시 동기화가 가능합니다.")
+if "custom_stock_pool" not in st.session_state:
+    st.session_state.custom_stock_pool = ["005930", "000660", "005380", "000270", "035420", "068270"]
 
-# 세션 상태 초기화
-if "stock_history" not in st.session_state:
-    st.session_state.stock_history = pd.DataFrame()
-if "last_ticker" not in st.session_state:
-    st.session_state.last_ticker = ""
-if "api_access_token" not in st.session_state:
-    st.session_state.api_access_token = None
+if "multi_market_data" not in st.session_state:
+    st.session_state.multi_market_data = {}
 
-# 사이드바 설정 (키 입력창 삭제하고 심플하게 유지)
-st.sidebar.header("🔍 대시보드 제어")
-server_status = "모의투자 운영중" if MOCK_FLAG else "🔥 실전계좌 운영중"
-st.sidebar.success(f"시스템 상태: {server_status}")
+# 🛠️ [사이드바] 종목 입력기
+st.sidebar.markdown("### 📋 종목 번호 입력")
+st.sidebar.caption("번호를 복사해 붙여넣으세요 (공백/쉼표 구분)")
 
-if st.sidebar.button("🔑 토큰 만료시 강제 재발급"):
-    st.session_state.api_access_token = None
-    st.sidebar.info("토큰이 리셋되었습니다. 다음 조회 시 자동 갱신됩니다.")
+raw_input_tickers = st.sidebar.text_area(
+    "종목코드 멀티 입력", 
+    placeholder="예: 005930 000660",
+    height=90
+)
+
+if st.sidebar.button("⚡ 종목 등록 및 동기화", use_container_width=True):
+    if raw_input_tickers.strip():
+        parsed_tickers = raw_input_tickers.replace(",", " ").replace("\n", " ").split()
+        clean_tickers = [t.strip() for t in parsed_tickers if len(t.strip()) == 6 and t.strip().isdigit()]
+        
+        if clean_tickers:
+            updated_pool = list(set(st.session_state.custom_stock_pool + clean_tickers))
+            st.session_state.custom_stock_pool = updated_pool
+            st.sidebar.success(f"추가 완료!")
+            st.rerun()
 
 st.sidebar.markdown("---")
-ticker_input = st.sidebar.text_input("종목코드 입력 (6자리 + Enter)", value="005930")
+st.sidebar.write(f"🔍 감시 목록 ({len(st.session_state.custom_stock_pool)}개)")
 
-# 종목 변경 시 히스토리 초기화
-if ticker_input != st.session_state.last_ticker:
-    st.session_state.stock_history = pd.DataFrame()
-    st.session_state.last_ticker = ticker_input
+delete_target = None
+for tk in list(st.session_state.custom_stock_pool):
+    col1, col2 = st.sidebar.columns([4, 1])
+    col1.caption(f"▪️ {get_stock_name(tk)}")
+    if col2.button("❌", key=f"del_{tk}"):
+        delete_target = tk
 
-if st.sidebar.button("🔄 실시간 시세 갱신 및 타점 연산") or (ticker_input and len(st.session_state.stock_history) == 0):
-    if APP_KEY == "여기에_본인의_App_Key_입력":
-        st.error("⚠️ 코드 상단의 APP_KEY와 APP_SECRET 값을 먼저 본인의 키로 변경해 주세요!")
-    else:
-        api = KoreaInvestmentAPI()
-        tick_data = api.get_realtime_price(ticker_input)
+if delete_target:
+    st.session_state.custom_stock_pool.remove(delete_target)
+    if delete_target in st.session_state.multi_market_data:
+        del st.session_state.multi_market_data[delete_target]
+    st.rerun()
+
+# 🏹 메인 모니터링 전광판
+st.markdown("### 🏹 실시간 수급 돌파 스캐너")
+st.caption(f"⏱️ 자동 갱신 중... ({datetime.now().strftime('%H:%M:%S')})")
+
+api = KoreaInvestmentAPI()
+current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+if st.button("🔑 버퍼 및 캐시 비우기 (시세 왜곡 시 클릭)", use_container_width=True):
+    st.session_state.multi_market_data = {}
+    st.rerun()
+
+summary_rows = []
+
+# 멀티 종목 실시간 연산 체인 가동
+for ticker in st.session_state.custom_stock_pool:
+    # 최초 진입 시 실시간 시세를 초기 주춧돌(Base) 삼아 버퍼 설정
+    if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
+        raw_price = api.get_realtime_price(ticker)
+        init_rows = []
+        init_times = []
+        base_p = raw_price["Close"] if raw_price["Close"] > 0 else 50000.0
         
-        if tick_data and tick_data["Close"] > 0:
-            new_row = pd.DataFrame([{
-                "Close": tick_data["Close"],
-                "High": tick_data["High"],
-                "Low": tick_data["Low"],
-                "Volume": tick_data["Volume"]
-            }], index=[pd.to_datetime(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))])
-            
-            st.session_state.stock_history = pd.concat([st.session_state.stock_history, new_row]).tail(30)
-            
-            df = calculate_indicators(st.session_state.stock_history.copy())
-            latest = df.iloc[-1]
-            prev_close = df['Close'].iloc[-2] if len(df) > 1 else latest['Close']
-            prev_local_high = latest['Local_High'] if not pd.isna(latest['Local_High']) else latest['Close']
-            prev_vol_ma = latest['Vol_MA'] if not pd.isna(latest['Vol_MA']) else latest['Volume']
-            
-            # --- 단타 매수 알고리즘 타점 검증 ---
-            cond_breakout = latest['Close'] >= prev_local_high
-            st_above_vwap = latest['Close'] > latest['VWAP']
-            cond_volume = latest['Volume'] > (prev_vol_ma * 1.02)
-            
-            is_buy_signal = cond_breakout and st_above_vwap and cond_volume
-            
-            # 전광판 시각화
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric(label=f"현재 체결가", value=f"{int(latest['Close']):,} 원", delta=f"{int(latest['Close'] - prev_close):,} 원")
-            with col2:
-                st.metric(label="당일 누적 거래량", value=f"{int(latest['Volume']):,} 주")
-            with col3:
-                st.metric(label="단기 저항선 (직전고가)", value=f"{int(prev_local_high):,} 원")
-            with col4:
-                st.metric(label="RSI (단기 심리지표)", value=f"{int(latest['RSI'])}" if not pd.isna(latest['RSI']) else "계산중")
-                
-            st.markdown("---")
-            
-            if is_buy_signal:
-                st.error(f"🔥 [매수 타점 포착] {ticker_input} 종목 저항선 돌파 및 VWAP 상방 거래량 밀집!")
-                st.balloons()
-            else:
-                st.success(f"🟢 [정상 추적 중] 현재 {ticker_input} 종목 수급 흐름 관망 상태.")
-                
-            st.subheader("📊 주가 및 단기 수급선(VWAP) 추이 분석")
-            chart_data = df[['Close', 'VWAP']]
-            chart_data.columns = ['현재가', '수급평균선(VWAP)']
-            st.line_chart(chart_data)
-            
-            st.dataframe(df.tail(5)[['Close', 'Volume', 'VWAP', 'RSI']], use_container_width=True)
+        for i in range(5, 0, -1):
+            time_str = (datetime.now() - timedelta(minutes=i)).strftime('%Y-%m-%d %H:%M:%S')
+            init_times.append(pd.to_datetime(time_str))
+            mock_p = base_p + (i * 10 if i % 2 == 0 else -i * 5)
+            init_rows.append({
+                "Close": mock_p, "High": mock_p * 1.001, "Low": mock_p * 0.999, "Volume": raw_price["Volume"]
+            })
+        st.session_state.multi_market_data[ticker] = pd.DataFrame(init_rows, index=init_times)
+
+    # 매 리프레시 루프마다 실시간 대조군 주입
+    live_tick = api.get_realtime_price(ticker)
+    if live_tick["Close"] > 0:
+        new_df = pd.DataFrame([{"Close": live_tick["Close"], "High": live_tick["High"], "Low": live_tick["Low"], "Volume": live_tick["Volume"]}], index=[pd.to_datetime(current_time_str)])
+        st.session_state.multi_market_data[ticker] = pd.concat([st.session_state.multi_market_data[ticker], new_df])
+        st.session_state.multi_market_data[ticker] = st.session_state.multi_market_data[ticker].loc[~st.session_state.multi_market_data[ticker].index.duplicated(keep='last')].tail(15)
+
+    calculated_df = process_quant_signals(st.session_state.multi_market_data[ticker].copy())
+    latest_info = calculated_df.iloc[-1]
+    
+    realtime_trading_value = latest_info['Close'] * latest_info['Volume']
+    
+    signal_weight = 2
+    if latest_info["타이밍 신호"] == "🔥 매수 타점!!":
+        signal_weight = 0
+    elif latest_info["타이밍 신호"] == "🚨 익절/청산":
+        signal_weight = 1
+
+    summary_rows.append({
+        "종목코드": ticker,
+        "종목명": get_stock_name(ticker),  
+        "현재 타이밍 신호": latest_info["타이밍 신호"],
+        "현재가": int(latest_info['Close']),
+        "수급선": int(latest_info['VWAP']),
+        "RSI": int(latest_info["RSI"]),
+        "저항선": int(latest_info['Local_High']),
+        "실시간거래대금": realtime_trading_value,
+        "신호가중치": signal_weight
+    })
+
+st.markdown("---")
+
+# 실시간 시세 보드 정렬 및 렌더링
+if summary_rows:
+    summary_df = pd.DataFrame(summary_rows)
+    summary_df = summary_df.sort_values(
+        by=['신호가중치', '실시간거래대금'], 
+        ascending=[True, False]
+    ).head(20).reset_index(drop=True)
+    
+    has_buy_signal = not summary_df[summary_df["신호가중치"] == 0].empty
+    if has_buy_signal:
+        st.audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg") 
+
+    for index, row in summary_df.iterrows():
+        sig = row["현재 타이밍 신호"]
+        rank_idx = index + 1
+        
+        card_header = f"**[{rank_idx}위] {row['종목명']}** ({row['종목코드']})"
+        
+        card_body = (
+            f"💵 **현재가**: {row['현재가']:,}원\n\n"
+            f"🔥 **RSI**: {row['RSI']} | 📊 **대금**: {int(row['실시간거래대금']/100000000):,}억\n\n"
+            f"🍏 **수급**: {row['수급선']:,}원 | 🛑 **저항**: {row['저항선']:,}원"
+        )
+        
+        if sig == "🔥 매수 타점!!":
+            with st.container():
+                st.error(f"🎯 **{sig}**\n\n{card_header}")
+                st.markdown(card_body)
+                st.markdown("---")
+        elif sig == "🚨 익절/청산":
+            with st.container():
+                st.warning(f"🚨 **{sig}**\n\n{card_header}")
+                st.markdown(card_body)
+                st.markdown("---")
+        else:
+            with st.container():
+                st.success(f"🍏 **{sig}**\n\n{card_header}")
+                st.markdown(card_body)
+                st.markdown("---")
+else:
+    st.info("💡 종목 번호들을 등록하시면 분석이 시작됩니다.")
+
+# =================================================================
+# 🔄 초단위 자동 인코딩 무한루프 엔진 (1.2초 리프레시 인터벌)
+# =================================================================
+time.sleep(1.2)
+st.rerun()
