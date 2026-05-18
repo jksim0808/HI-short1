@@ -174,7 +174,6 @@ def process_quant_signals(df):
 st.set_page_config(page_title="모바일 단타 스캐너", layout="centered")
 
 st.markdown("### 🏹 실시간 주도 섹터 수급 스캐너")
-st.caption(f"최종 동기화: {datetime.now().strftime('%H:%M:%S')}")
 
 if "multi_market_data" not in st.session_state:
     st.session_state.multi_market_data = {}
@@ -214,6 +213,7 @@ with st.expander("📊 현재 업종 수급 순위 보기"):
 
 # 전광판 데이터 연산 루프
 summary_rows = []
+total_accumulated_ticks = [] # 현재 시전 상태 분석용
 
 for ticker in flat_ticker_list:
     name = ticker_to_name_map[ticker]
@@ -253,12 +253,14 @@ for ticker in flat_ticker_list:
             st.session_state.multi_market_data[ticker] = pd.concat([st.session_state.multi_market_data[ticker], new_df])
             st.session_state.multi_market_data[ticker] = st.session_state.multi_market_data[ticker].loc[~st.session_state.multi_market_data[ticker].index.duplicated(keep='last')].tail(15)
 
+    # 현재 시전 깊이(데이터 수량) 수집
+    total_accumulated_ticks.append(len(st.session_state.multi_market_data[ticker]))
+
     calculated_df = process_quant_signals(st.session_state.multi_market_data[ticker].copy())
     latest_info = calculated_df.iloc[-1]
     
     sector_rank = [i for i, (s_name, _) in enumerate(sorted_sectors) if s_name == belonging_sector][0]
     
-    # 정렬용 신호 가중치 부여 (매수타점=0순위, 익절=1순위, 관망=2순위)
     signal_weight = 2
     if latest_info["타이밍 신호"] == "🔥 매수 타점!!":
         signal_weight = 0
@@ -279,17 +281,26 @@ for ticker in flat_ticker_list:
     })
 
 summary_df = pd.DataFrame(summary_rows)
-# 🌟 [정렬 엔진 적용] 신호가중치(0순위가 최상단)를 기준으로 정렬한 뒤 업종 순위별로 2차 정렬합니다.
 summary_df = summary_df.sort_values(by=['신호가중치', '업종순위가중치']).reset_index(drop=True)
+
+# --- 🌟 [현재 시전 평가 전광판 모듈] ---
+avg_ticks = np.mean(total_accumulated_ticks) if total_accumulated_ticks else 5
+# 최대 15개 샘플링 기준 데이터 성숙도 연산 (5개 기본제공 = 33%)
+data_maturity = min(100, int((avg_ticks / 15.0) * 100))
+
+if data_maturity <= 40:
+    st.info(f"⏳ **현재 시전 점검**: 데이터 축적도 **{data_maturity}%** (기저 데이터 빌드 완료. '실시간 스캔'을 눌러 실시간 시세를 채워 갈수록 타점 평가가 정밀해집니다.)")
+elif data_maturity < 80:
+    st.success(f"⚡ **현재 시전 점검**: 데이터 축적도 **{data_maturity}%** (실시간 시세 정상 추적 중. 데이터 신뢰도 보통)")
+else:
+    st.error(f"🔥 **현재 시전 점검**: 데이터 축적도 **{data_maturity}%** (최대치 버퍼 확보 완료! 돌파 타점 실시간 평가 신뢰도 최상)")
 
 # --- 카드형 리스트 순차 출력 ---
 st.markdown("---")
 
-# 매수 타점이 존재하는지 체크하기 위한 플래그
 has_buy_signal = not summary_df[summary_df["신호가중치"] == 0].empty
-
 if has_buy_signal:
-    st.audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg") # 타점 발생 시 가벼운 알림음 효과 (브라우저 지원 시 재생)
+    st.audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg") 
 
 for index, row in summary_df.iterrows():
     sig = row["현재 타이밍 신호"]
