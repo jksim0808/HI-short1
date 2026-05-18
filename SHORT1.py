@@ -70,7 +70,7 @@ class NaverFinanceAPI:
             return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
 
 # =================================================================
-# 🏷️ 국내 주요 종목 마스터 사전 (기본 24개 자동 등록)
+# 🏷️ 국내 주요 종목 마스터 사전 (종목명 매핑 엔진)
 # =================================================================
 STOCK_NAME_MAP = {
     "005930": "삼성전자", "000660": "SK하이닉스", "005380": "현대차", "000270": "기아",
@@ -82,7 +82,7 @@ STOCK_NAME_MAP = {
 }
 
 def get_stock_name(ticker):
-    return STOCK_NAME_MAP.get(ticker, f"종목({ticker})")
+    return STOCK_NAME_MAP.get(ticker, f"종목")
 
 # =================================================================
 # 📊 기술적 지표 퀀트 연산 엔진
@@ -126,7 +126,7 @@ def process_quant_signals(df):
     return df
 
 # =================================================================
-# 🖥️ 웹 대시보드 인터페이스 영역 (모바일 초최적화 뷰)
+# 🖥️ 웹 대시보드 인터페이스 영역 (모바일 종목명+종목코드 완전 결합형)
 # =================================================================
 st.set_page_config(page_title="스캐너", layout="centered")
 
@@ -136,9 +136,9 @@ if "custom_stock_pool" not in st.session_state:
 if "multi_market_data" not in st.session_state:
     st.session_state.multi_market_data = {}
 
-# 🛠️ [사이드바] 모바일 컴팩트 입력기
+# 🛠️ [사이드바] 모바일 입력창
 st.sidebar.markdown("### 📋 종목 코드 등록")
-raw_input_tickers = st.sidebar.text_area("쉼표나 공백으로 구분", placeholder="예: 005930 000660", height=70)
+raw_input_tickers = st.sidebar.text_area("번호만 입력 가능 (공백/쉼표 구분)", placeholder="예: 005930 000660", height=70)
 
 if st.sidebar.button("⚡ 종목 등록/동기화", use_container_width=True):
     if raw_input_tickers.strip():
@@ -151,11 +151,11 @@ if st.sidebar.button("⚡ 종목 등록/동기화", use_container_width=True):
 st.sidebar.markdown("---")
 st.sidebar.write(f"🔍 감시 중: {len(st.session_state.custom_stock_pool)}개")
 
-# 사이드바 리스트 컴팩트 처리
+# 사이드바 감시 목록 노출 시에도 명칭+번호 결합형으로 직관성 확보
 delete_target = None
 for tk in list(st.session_state.custom_stock_pool):
     col1, col2 = st.sidebar.columns([4, 1])
-    col1.caption(f"▪️ {get_stock_name(tk)}")
+    col1.caption(f"▪️ {get_stock_name(tk)} ({tk})")
     if col2.button("❌", key=f"del_{tk}"):
         delete_target = tk
 
@@ -215,7 +215,8 @@ for ticker in st.session_state.custom_stock_pool:
     summary_rows.append({
         "종목코드": ticker,
         "종목명": get_stock_name(ticker),  
-        "현재 타이밍 신호": latest_info["타이밍 신호"],
+        "현재 타이밍 신호": latest_info["타이밍 신 death"], # 내부 변수명 호환 유지
+        "타이밍_레이블": latest_info["타이밍 신호"],
         "현재가": int(latest_info['Close']),
         "수급선": int(latest_info['VWAP']),
         "RSI": int(latest_info["RSI"]),
@@ -229,42 +230,38 @@ st.markdown("---")
 # 스마트폰 화면 맞춤형 순위 보드 렌더링
 if summary_rows:
     summary_df = pd.DataFrame(summary_rows)
-    # 매수 -> 청산 -> 거래대금 순 정렬 후 상위 20개 타이트 고정
     summary_df = summary_df.sort_values(by=['신호가중치', '실시간거래대금'], ascending=[True, False]).head(20).reset_index(drop=True)
     
     if not summary_df[summary_df["신호가중치"] == 0].empty:
         st.audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg") 
 
     for index, row in summary_df.iterrows():
-        sig = row["현재 타이밍 신호"]
+        sig = row["타이밍_레이블"]
         rank = index + 1
         
-        # 모바일 가로폭 폭망 방지용 컴팩트 문자열 조립
-        card_title = f"**[{rank}위] {row['종목명']}** `{row['종목코드']}`"
+        # 핵심 변경: 헤더에 종목명과 종목번호를 직관적으로 결합하여 동시 노출
+        card_title = f"**[{rank}위] {row['종목명']} ({row['종목코드']})**"
+        
         card_metrics = f"💰 **{row['현재가']:,}원** | RSI: `{row['RSI']}` | 📊 대금: **{int(row['실시간거래대금']/100000000):,}억**"
         card_sub_metrics = f"🍏 수급: {row['수급선']:,}원 / 🛑 저항: {row['저항선']:,}원"
         
-        # 상태별 카드 컨테이너 컬러 분기
         if sig == "🔥 매수":
             with st.container():
                 st.error(f"🎯 **{sig} 타점!** │ {card_title}")
                 st.markdown(card_metrics)
                 st.caption(card_sub_metrics)
-                st.markdown("<div style='margin-bottom:-5px;'></div>", unsafe_allow_html=True)
                 st.markdown("---")
         elif sig == "🚨 청산":
             with st.container():
                 st.warning(f"🚨 **{sig}/익절** │ {card_title}")
                 st.markdown(card_metrics)
                 st.caption(card_sub_metrics)
-                st.markdown("<div style='margin-bottom:-5px;'></div>", unsafe_allow_html=True)
                 st.markdown("---")
         else:
             with st.container():
                 st.success(f"🟢 **{sig} 대기** │ {card_title}")
                 st.markdown(card_metrics)
                 st.caption(card_sub_metrics)
-                st.markdown("<div style='margin-bottom:-5px;'></div>", unsafe_allow_html=True)
                 st.markdown("---")
 else:
     st.info("💡 오른쪽 상단 사이드바 버튼을 열어 종목을 추가해 주세요.")
