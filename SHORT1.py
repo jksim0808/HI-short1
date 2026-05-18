@@ -8,7 +8,7 @@ import time
 import re
 
 # =================================================================
-# 🏦 네이버 금융 실시간 웹 스크래핑 엔진 (한투/야후 대안 완벽 대체)
+# 🏦 네이버 금융 실시간 웹 스크래핑 엔진
 # =================================================================
 class NaverFinanceAPI:
     def __init__(self):
@@ -26,7 +26,7 @@ class NaverFinanceAPI:
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, "html.parser")
                 
-                # 1. 현재가 추출 (blind 태그 내부의 텍스트 파싱)
+                # 1. 현재가 추출
                 today_div = soup.find("div", {"class": "today"})
                 if not today_div:
                     return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
@@ -34,11 +34,11 @@ class NaverFinanceAPI:
                 blind_now = today_div.find("span", {"class": "blind"})
                 current_price = float(re.sub(r'[^\d]', '', blind_now.text))
                 
-                # 2. 고가, 저가, 거래량 추출 (table.no_info 태그 내부 파싱)
+                # 2. 고가, 저가, 거래량 추출
                 no_info_table = soup.find("table", {"class": "no_info"})
                 high_price = current_price
                 low_price = current_price
-                volume = 150000.0  # 기본값 방어선
+                volume = 150000.0
                 
                 if no_info_table:
                     tds = no_info_table.find_all("td")
@@ -50,13 +50,10 @@ class NaverFinanceAPI:
                         text_val = blind_span.text.strip()
                         parent_text = td.text
                         
-                        # 고가 판별
                         if "고가" in parent_text and "52주" not in parent_text:
                             high_price = float(re.sub(r'[^\d]', '', text_val))
-                        # 저가 판별
                         elif "저가" in parent_text and "52주" not in parent_text:
                             low_price = float(re.sub(r'[^\d]', '', text_val))
-                        # 거래량 판별
                         elif "거래량" in parent_text:
                             volume = float(re.sub(r'[^\d]', '', text_val))
 
@@ -73,7 +70,7 @@ class NaverFinanceAPI:
             return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
 
 # =================================================================
-# 🏷️ 국내 주요 종목 코드 마스터 매핑 딕셔너리
+# 🏷️ 국내 주요 종목 코드 마스터 매핑 딕셔너리 (감시 풀 기본 확장)
 # =================================================================
 STOCK_NAME_MAP = {
     "005930": "삼성전자", "000660": "SK하이닉스", "005380": "현대차", "000270": "기아",
@@ -133,15 +130,16 @@ def process_quant_signals(df):
 # =================================================================
 st.set_page_config(page_title="실시간 스캐너", layout="centered")
 
+# 📌 초기 감시 풀 목록을 주요 대형주 24개 전체로 대폭 확장
 if "custom_stock_pool" not in st.session_state:
-    st.session_state.custom_stock_pool = ["005930", "000660", "005380", "000270", "035420", "068270"]
+    st.session_state.custom_stock_pool = list(STOCK_NAME_MAP.keys())
 
 if "multi_market_data" not in st.session_state:
     st.session_state.multi_market_data = {}
 
 # 🛠️ [사이드바] 종목 입력기
 st.sidebar.markdown("### 📋 종목 번호 입력")
-st.sidebar.caption("번호를 복사해 붙여넣으세요 (공백/쉼표 구분)")
+st.sidebar.caption("공백이나 쉼표로 구분하여 추가 가능")
 
 raw_input_tickers = st.sidebar.text_area(
     "종목코드 멀티 입력", 
@@ -163,11 +161,12 @@ if st.sidebar.button("⚡ 종목 등록 및 동기화", use_container_width=True
 st.sidebar.markdown("---")
 st.sidebar.write(f"🔍 감시 목록 ({len(st.session_state.custom_stock_pool)}개)")
 
+# 모바일 사이드바 세로 폭 폭망 방지를 위해 컴팩트 UI로 변경
 delete_target = None
 for tk in list(st.session_state.custom_stock_pool):
     col1, col2 = st.sidebar.columns([4, 1])
     col1.caption(f"▪️ {get_stock_name(tk)}")
-    if col2.button("❌", key=f"del_{tk}"):
+    if col2.button("❌", key=f"del_{tk}", help="삭제"):
         delete_target = tk
 
 if delete_target:
@@ -178,7 +177,7 @@ if delete_target:
 
 # 🏹 메인 모니터링 전광판
 st.markdown("### 🏹 실시간 네이버 수급 스캐너")
-st.caption(f"⏱️ 네이버 금융 연동 자동 갱신 중... ({datetime.now().strftime('%H:%M:%S')})")
+st.caption(f"⏱️ 자동 갱신 중... ({datetime.now().strftime('%H:%M:%S')})")
 
 api = NaverFinanceAPI()
 current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -191,7 +190,6 @@ summary_rows = []
 
 # 멀티 종목 실시간 연산 체인 가동
 for ticker in st.session_state.custom_stock_pool:
-    # 최초 진입 시 네이버 실시간 주가를 기반으로 타임 프레임 버퍼 생성
     if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
         raw_price = api.get_realtime_price(ticker)
         init_rows = []
@@ -207,7 +205,6 @@ for ticker in st.session_state.custom_stock_pool:
             })
         st.session_state.multi_market_data[ticker] = pd.DataFrame(init_rows, index=init_times)
 
-    # 매 리프레시 루프마다 네이버 최신가 주입
     live_tick = api.get_realtime_price(ticker)
     if live_tick["Close"] > 0:
         new_df = pd.DataFrame([{"Close": live_tick["Close"], "High": live_tick["High"], "Low": live_tick["Low"], "Volume": live_tick["Volume"]}], index=[pd.to_datetime(current_time_str)])
@@ -239,13 +236,13 @@ for ticker in st.session_state.custom_stock_pool:
 
 st.markdown("---")
 
-# 실시간 시세 보드 정렬 및 렌더링
+# 실시간 시세 보드 정렬 및 렌더링 (최대 20위까지 노출)
 if summary_rows:
     summary_df = pd.DataFrame(summary_rows)
     summary_df = summary_df.sort_values(
         by=['신호가중치', '실시간거래대금'], 
         ascending=[True, False]
-    ).head(20).reset_index(drop=True)
+    ).head(20).reset_index(drop=True)  # 📊 최대 20개 종목 순위 정렬 고정
     
     has_buy_signal = not summary_df[summary_df["신호가중치"] == 0].empty
     if has_buy_signal:
@@ -282,7 +279,7 @@ else:
     st.info("💡 종목 번호들을 등록하시면 분석이 시작됩니다.")
 
 # =================================================================
-# 🔄 초단위 자동 인코딩 무한루프 엔진 (1.2초 리프레시 인터벌)
+# 🔄 초단위 자동 리프레시 루프 (1.2초 인터벌)
 # =================================================================
 time.sleep(1.2)
 st.rerun()
