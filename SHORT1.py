@@ -148,7 +148,7 @@ if st.sidebar.button("🔑 시스템 완전히 초기화"):
     st.session_state.api_access_token = None
     st.session_state.last_token_request_time = None
     st.session_state.stock_history = pd.DataFrame()
-    st.experimental_rerun()
+    st.rerun()
 
 st.sidebar.markdown("---")
 ticker_input = st.sidebar.text_input("종목코드 입력 (6자리 + Enter)", value="005930")
