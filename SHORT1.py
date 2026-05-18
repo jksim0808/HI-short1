@@ -6,26 +6,25 @@ from datetime import datetime, timedelta
 import time
 
 # =================================================================
-# 🔑 [모의투자 계좌 설정] Streamlit Secrets 내부 금고 연동
+# 🔑 [실전투자 계좌 설정] Streamlit Secrets 내부 금고 연동
 # =================================================================
+# ⚠️ 반드시 한국투자증권 '실전투자용' App Key와 Secret Key를 Secrets에 넣으셔야 합니다.
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "YOUR_APP_KEY")
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "YOUR_APP_SECRET")
-MOCK_FLAG = True  # 👈 모의투자 True 고정
+MOCK_FLAG = False  # 👈 실전투자용 강제 스위칭 (False 고정)
 
 # =================================================================
-# 🏦 한국투자증권 API & 야후 파이낸스 실시간 정밀 연동 엔진
+# 🏦 한국투자증권 실전 API & 야후 파이낸스 실시간 정밀 연동 엔진
 # =================================================================
 class KoreaInvestmentAPI:
     def __init__(self):
-        # 💡 모의투자(vts)와 실전 서버 주소 정의
-        if MOCK_FLAG:
-            self.base_url = "https://openapivts.koreainvestment.com:29443"
-        else:
-            self.base_url = "https://openapi.koreainvestment.com:9443"
+        # 실전투자 전용 도메인 고정
+        self.base_url = "https://openapi.koreainvestment.com:9443"
         self.app_key = APP_KEY
         self.app_secret = APP_SECRET
 
     def get_access_token(self):
+        """ 실전 토큰 세션 캐싱 및 실시간 갱신 모듈 """
         if "api_access_token" in st.session_state and st.session_state.api_access_token:
             return st.session_state.api_access_token
         
@@ -43,39 +42,34 @@ class KoreaInvestmentAPI:
             return None
 
     def get_realtime_price(self, ticker):
-        """ 💡 404 에러 원천 차단: 한투 표준 API 주소 체계 정밀 재매핑 """
+        """ 실전투자 실시간 호가/체결 데이터 수신 및 백업 체인 구문 """
         access_token = self.get_access_token()
         if not access_token:
             return self.get_yahoo_backup_price(ticker)
             
-        # 💡 최신 표준 주소 형식으로 명확히 정렬
+        # 실전투자용 국내주식 현재가 조회 표준 엔드포인트
         url = f"{self.base_url}/uapi/domestic-stock/v1/quoting/inquire-price"
-        
-        # 💡 모의투자와 실전투자용 TR_ID 분기 재정비
-        target_tr_id = "VTST01010200" if MOCK_FLAG else "FHKST01010200"
+        target_tr_id = "FHKST01010200"  # 👈 실전투자 전용 TR_ID 고정
         
         headers = {
-            "content-type": "application/json; charset=utf-8", # 💡 인코딩 타입 명시
+            "content-type": "application/json; charset=utf-8",
             "authorization": f"Bearer {access_token}",
             "appkey": self.app_key,
             "appsecret": self.app_secret,
             "tr_id": target_tr_id,
-            "custtype": "P" # 💡 개인 투자자 코드 명시 (누락 방지)
+            "custtype": "P"  # 개인고객 고정
         }
-        
-        # 💡 파라미터 대문자 준수
         params = {
             "FID_COND_MRKT_DIV_CODE": "J", 
             "FID_INPUT_ISCD": str(ticker).strip()
         }
         
         try:
-            # 💡 한투 API 규격에 맞춰 GET 요청 전송
             response = requests.get(url, headers=headers, params=params, timeout=3.0)
-            
             if response.status_code == 200:
                 res_data = response.json().get("output", {})
                 if res_data and res_data.get("stck_prpr"):
+                    # 데이터 전처리 (+/- 부호 및 특수문자 정제)
                     current_price = float(str(res_data.get("stck_prpr")).strip().replace("-", "").replace("+", ""))
                     high_price = float(str(res_data.get("stck_hgpr", current_price)).strip().replace("-", "").replace("+", ""))
                     low_price = float(str(res_data.get("stck_lwpr", current_price)).strip().replace("-", "").replace("+", ""))
@@ -88,13 +82,13 @@ class KoreaInvestmentAPI:
                             "Low": low_price if low_price > 0 else current_price,
                             "Volume": volume if volume > 0 else 1000.0
                         }
-            # 💡 한투에서 에러가 나거나 404가 뜨면 즉시 야후 백업 엔진 작동
+            # 한투 과부하 대기 발생 시 야후 실시간 피드로 즉시 유연하게 스위칭
             return self.get_yahoo_backup_price(ticker)
         except:
             return self.get_yahoo_backup_price(ticker)
 
     def get_yahoo_backup_price(self, ticker):
-        """ 한투 비상시 작동하는 야후 파이낸스 실시간 엔진 """
+        """ 비상용 야후 파이낸스 실시간 시세 트래킹 피드 """
         try:
             clean_ticker = str(ticker).strip()
             yahoo_ticker = f"{clean_ticker}.KQ"
@@ -132,7 +126,7 @@ class KoreaInvestmentAPI:
             return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
 
 # =================================================================
-# 🏷️ 국내 주요 종목 코드 마스터 매핑 딕셔너리
+# 🏷️ 국내 주요 대형주 및 핵심 종목 마스터 딕셔너리
 # =================================================================
 STOCK_NAME_MAP = {
     "005930": "삼성전자", "000660": "SK하이닉스", "005380": "현대차", "000270": "기아",
@@ -147,7 +141,7 @@ def get_stock_name(ticker):
     return STOCK_NAME_MAP.get(ticker, f"종목({ticker})")
 
 # =================================================================
-# 📊 기술적 지표 퀀트 연산 엔진
+# 📊 퀀트 시계열 연산 코어 엔진 (VWAP, RSI, 고가 저항 스캔)
 # =================================================================
 def process_quant_signals(df):
     if len(df) < 2:
@@ -178,6 +172,7 @@ def process_quant_signals(df):
         p_local_high = df['High'].iloc[max(0, idx-3):idx].max()
         p_vol_ma = df['Volume'].iloc[max(0, idx-3):idx].mean()
         
+        # 🏹 거래량 분출 + 직전 3분봉 최고가 돌파 + VWAP 수급선 상회 조건 충족시 매수 신호
         if (c_row['Close'] > c_row['VWAP']) and (c_row['Close'] >= p_local_high) and (c_row['Volume'] > p_vol_ma * 1.02) and (c_row['RSI'] < 78):
             signals.append("🔥 매수 타점!!")
         elif c_row['RSI'] > 82:
@@ -188,9 +183,9 @@ def process_quant_signals(df):
     return df
 
 # =================================================================
-# 🖥️ 웹 대시보드 인터페이스 영역
+# 🖥️ 모바일 웹 대시보드 인터페이스 영역
 # =================================================================
-st.set_page_config(page_title="실시간 스캐너", layout="centered")
+st.set_page_config(page_title="실전 수급 스캐너", layout="centered")
 
 if "custom_stock_pool" not in st.session_state:
     st.session_state.custom_stock_pool = ["005930", "000660", "005380", "000270", "035420", "068270"]
@@ -198,6 +193,7 @@ if "custom_stock_pool" not in st.session_state:
 if "multi_market_data" not in st.session_state:
     st.session_state.multi_market_data = {}
 
+# 🛠️ [사이드바] 실시간 감시 종목 추가/삭제 
 st.sidebar.markdown("### 📋 종목 번호 입력")
 raw_input_tickers = st.sidebar.text_area("종목코드 멀티 입력", placeholder="예: 005930 000660", height=90)
 
@@ -211,7 +207,7 @@ if st.sidebar.button("⚡ 종목 등록 및 동기화", use_container_width=True
             st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.write(f"🔍 감시 목록 ({len(st.session_state.custom_stock_pool)}개)")
+st.sidebar.write(f"🔍 실시간 감시 목록 ({len(st.session_state.custom_stock_pool)}개)")
 
 delete_target = None
 for tk in list(st.session_state.custom_stock_pool):
@@ -224,18 +220,21 @@ if delete_target:
     if delete_target in st.session_state.multi_market_data: del st.session_state.multi_market_data[delete_target]
     st.rerun()
 
-st.markdown("### 🏹 실시간 수급 돌파 스캐너")
-st.caption(f"⏱️ 자동 갱신 중... ({datetime.now().strftime('%H:%M:%S')})")
+# 🎯 메인 대시보드 스캔 현황판
+st.markdown("### 🏹 실전 수급 돌파 스캐너")
+st.caption(f"⏱️ 실시간 거래소 동기화 중... ({datetime.now().strftime('%H:%M:%S')})")
 
 api = KoreaInvestmentAPI()
 current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-if st.button("🔑 버퍼 및 캐시 비우기", use_container_width=True):
+if st.button("🔑 버퍼 및 캐시 비우기 (오류 초기화)", use_container_width=True):
     st.session_state.multi_market_data = {}
+    st.session_state.api_access_token = None
     st.rerun()
 
 summary_rows = []
 
+# 멀티 종목 실시간 연산 체인 가동
 for ticker in st.session_state.custom_stock_pool:
     if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
         raw_price = api.get_realtime_price(ticker)
@@ -259,7 +258,9 @@ for ticker in st.session_state.custom_stock_pool:
     calculated_df = process_quant_signals(st.session_state.multi_market_data[ticker].copy())
     latest_info = calculated_df.iloc[-1]
     
+    # 💡 실제 당일 누적 거래대금 산출
     realtime_trading_value = latest_info['Close'] * latest_info['Volume']
+    
     signal_weight = 2
     if latest_info["타이밍 신호"] == "🔥 매수 타점!!": signal_weight = 0
     elif latest_info["타이밍 신호"] == "🚨 익절/청산": signal_weight = 1
@@ -272,9 +273,11 @@ for ticker in st.session_state.custom_stock_pool:
 
 st.markdown("---")
 
+# 수급 신호 포착 및 정렬 렌더링
 if summary_rows:
     summary_df = pd.DataFrame(summary_rows).sort_values(by=['신호가중치', '실시간거래대금'], ascending=[True, False]).reset_index(drop=True)
     
+    # 매수 신호 발생 시 시스템 알림음 재생
     if not summary_df[summary_df["신호가중치"] == 0].empty:
         st.audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg") 
 
@@ -300,5 +303,6 @@ if summary_rows:
             with st.container():
                 st.success(f"🍏 **{sig}**\n\n{card_header}"); st.markdown(card_body); st.markdown("---")
 
+# 🔄 1.2초 대기 후 페이지 무한 리프레시 메커니즘
 time.sleep(1.2)
 st.rerun()
