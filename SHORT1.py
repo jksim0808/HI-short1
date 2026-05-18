@@ -14,7 +14,7 @@ class NaverFastMultiAPI:
         }
 
     def get_bulk_realtime_prices(self, tickers):
-        """ 20개 이상의 종목 데이터를 단 하나의 네트워크 패킷으로 일괄 수신 (병목 현상 원천 차단) """
+        """ 20개 이상의 종목 데이터를 단 하나의 네트워크 패킷으로 일괄 수신 """
         if not tickers:
             return {}
         try:
@@ -79,9 +79,9 @@ def process_advanced_quant(df, total_value):
         p_high = df['High'].iloc[max(0, idx-3):idx].max()
         p_vol_ma = df['Volume'].iloc[max(0, idx-3):idx].mean()
         
-        # 🚨 [신뢰성 보정 필터 가동] 
+        # 🚨 [신뢰성 보정 필터] 
         is_breakout = (row['Close'] > row['VWAP']) and (row['Close'] >= p_high) and (row['Volume'] > p_vol_ma * 1.02)
-        is_market_leader = total_value >= 30000000000  # 당일 누적 거래대금 300억 이상 주도주 필터
+        is_market_leader = total_value >= 30000000000  # 거래대금 300억 이상 주도주만 통과
         is_strong_trend = row['Close'] >= (df['High'].max() * 0.97)
 
         if is_breakout and is_market_leader and is_strong_trend and (row['RSI'] < 78):
@@ -151,7 +151,6 @@ if delete_target:
 st.markdown("### 🏹 실시간 모바일 스캐너 (초고속 엔진)")
 st.caption(f"ℹ️ 수동 업데이트 모드 (화면 조작 시 실시간 갱신) • 현재시각: {datetime.now().strftime('%H:%M:%S')}")
 
-# 사용자가 즉시 시세를 새로고침하고 싶을 때 누르는 마스터 버튼
 if st.button("🔄 실시간 시세 수동 새로고침", use_container_width=True):
     st.rerun()
 
@@ -162,7 +161,7 @@ if st.button("🔑 버퍼 및 캐시 비우기", use_container_width=True):
 
 summary_rows = []
 
-# ⚡ 20개 종목을 단 한 번의 요청으로 일괄 수신
+# ⚡ 20개 종목 멀티 패킷 일괄 수신
 bulk_data = api.get_bulk_realtime_prices(st.session_state.custom_stock_pool)
 
 for ticker in st.session_state.custom_stock_pool:
@@ -200,7 +199,9 @@ st.markdown("---")
 # 스마트폰 화면 레이아웃 최적화 렌더링
 if summary_rows:
     summary_df = pd.DataFrame(summary_rows)
-    summary_df = summary_df.sort_values(by=['text_value' if 'text_value' in summary_df else '신호가중치', '당일거래대금'], ascending=[True, False]).reset_index(drop=True)
+    
+    # 🔥 [버그 수정 완료] 신호가중치(매수 우선) 정렬 후 당일거래대금 순으로 완벽하게 멀티 정렬합니다.
+    summary_df = summary_df.sort_values(by=['신호가중치', '당일거래대금'], ascending=[True, False]).reset_index(drop=True)
     
     if not summary_df[summary_df["신호가중치"] == 0].empty:
         st.audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg") 
