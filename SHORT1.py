@@ -8,7 +8,7 @@ import time
 import re
 
 # =================================================================
-# 🏦 네이버 금융 실시간 웹 스크래핑 엔진 (종목명 추출 기능 추가)
+# 🏦 네이버 금융 실시간 웹 스크래핑 엔진
 # =================================================================
 class NaverFinanceAPI:
     def __init__(self):
@@ -29,7 +29,7 @@ class NaverFinanceAPI:
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, "html.parser")
                 
-                # [핵심 보완] 네이버 금융 헤더 영역에서 실제 종목명 추출
+                # 네이버 금융 헤더 영역에서 실제 종목명 추출
                 wrap_company = soup.find("div", {"class": "wrap_company"})
                 if wrap_company and wrap_company.find("h2"):
                     extracted_name = wrap_company.find("h2").text.strip()
@@ -78,10 +78,36 @@ class NaverFinanceAPI:
         except:
             return {"Name": f"종목({ticker})", "Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
 
-# 기본 하드코딩 사전 (웹 크롤링 실패 시 메모리 방어용 백업 데이터)
+# =================================================================
+# 🎯 [업데이트] 대한민국 시장 주도주 및 트렌드 핵심 20종목 마스터 사전
+# =================================================================
 STOCK_NAME_MAP = {
-    "005930": "삼성전자", "000660": "SK하이닉스", "005380": "현대차", "000270": "기아",
-    "035420": "NAVER", "035720": "카카오", "068270": "셀트리온", "373220": "LG엔솔"
+    # 1. 반도체 / AI / 핵심 대형주
+    "005930": "삼성전자", 
+    "000660": "SK하이닉스", 
+    "004170": "신세계", 
+    "035420": "NAVER",
+    # 2. 자동차 / 모빌리티 미래차
+    "005380": "현대차", 
+    "000270": "기아", 
+    "012330": "현대모비스",
+    # 3. 2차전지 / 핵심 소재
+    "373220": "LG에너지솔루션", 
+    "006400": "삼성SDI", 
+    "051910": "LG화학", 
+    "005490": "POSCO홀딩스", 
+    "247540": "에코프로비엠",
+    # 4. 바이오 / 제약 대장주
+    "207940": "삼성바이오로직스", 
+    "068270": "셀트리온", 
+    "000100": "유한양행",
+    # 5. 방산 / 조선 / 인프라 주도주
+    "047190": "한화에어로스페이스", 
+    "010140": "삼성중공업",
+    # 6. 로봇 / 엔터 / 금융 밸류업
+    "443250": "두산로보틱스", 
+    "352820": "하이브", 
+    "105560": "KB금융"
 }
 
 # =================================================================
@@ -126,17 +152,17 @@ def process_quant_signals(df):
     return df
 
 # =================================================================
-# 🖥️ 웹 대시보드 인터페이스 영역 (모바일 화면 최적화)
+# 🖥️ 웹 대시보드 인터페이스 영역 (모바일 최적화)
 # =================================================================
 st.set_page_config(page_title="스캐너", layout="centered")
 
+# 초기 기동 시 20종목 풀로 바인딩
 if "custom_stock_pool" not in st.session_state:
     st.session_state.custom_stock_pool = list(STOCK_NAME_MAP.keys())
 
 if "multi_market_data" not in st.session_state:
     st.session_state.multi_market_data = {}
 
-# 실시간 크롤링된 실제 이름들을 전역 유지하기 위한 메모리 세션 기동
 if "cached_stock_names" not in st.session_state:
     st.session_state.cached_stock_names = STOCK_NAME_MAP.copy()
 
@@ -155,13 +181,12 @@ if st.sidebar.button("⚡ 종목 등록/동기화", use_container_width=True):
             st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.write(f"🔍 감시 중: {len(st.session_state.custom_stock_pool)}개")
+st.sidebar.write(f"🔍 감시 중: {len(st.session_state.custom_stock_pool)}개 종목")
 
 # 사이드바 리스트 렌더링
 delete_target = None
 for tk in list(st.session_state.custom_stock_pool):
     col1, col2 = st.sidebar.columns([4, 1])
-    # 메모리에 저장된 실시간 이름 매핑 매칭
     display_name = st.session_state.cached_stock_names.get(tk, f"종목({tk})")
     col1.caption(f"▪️ {display_name} ({tk})")
     if col2.button("❌", key=f"del_{tk}"):
@@ -174,7 +199,7 @@ if delete_target:
     st.rerun()
 
 # 🏹 메인 모니터링 영역
-st.markdown("### 🏹 실시간 모바일 스캐너")
+st.markdown("### 🏹 실시간 모바일 스캐너 (20대 주도주)")
 st.caption(f"🔄 자동 갱신 중... ({datetime.now().strftime('%H:%M:%S')})")
 
 current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -190,7 +215,6 @@ summary_rows = []
 for ticker in st.session_state.custom_stock_pool:
     live_tick = api.get_realtime_price(ticker)
     
-    # [핵심] 웹에서 정상 추출된 종목명을 세션 캐시에 실시간 반영 업데이트
     if "Name" in live_tick and not live_tick["Name"].startswith("종목("):
         st.session_state.cached_stock_names[ticker] = live_tick["Name"]
         
@@ -243,7 +267,8 @@ st.markdown("---")
 # 스마트폰 화면 맞춤형 순위 보드 렌더링
 if summary_rows:
     summary_df = pd.DataFrame(summary_rows)
-    summary_df = summary_df.sort_values(by=['신호가중치', '실시간거래대금'], ascending=[True, False]).head(20).reset_index(drop=True)
+    # 신호 우선 정렬 후 실시간 거래대금 순 정렬
+    summary_df = summary_df.sort_values(by=['신호가중치', '실시간거래대금'], ascending=[True, False]).head(25).reset_index(drop=True)
     
     if not summary_df[summary_df["신호가중치"] == 0].empty:
         st.audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg") 
@@ -252,7 +277,7 @@ if summary_rows:
         sig = row["현재 타이밍 신호"]
         rank = index + 1
         
-        # 실제 웹에서 긁어온 진짜 종목명과 코드를 완벽하게 결합하여 출력
+        # 이름과 번호 결합 출력
         card_title = f"**[{rank}위] {row['종목명']} ({row['종목코드']})**"
         
         card_metrics = f"💰 **{row['현재가']:,}원** | RSI: `{row['RSI']}` | 📊 대금: **{int(row['실시간거래대금']/100000000):,}억**"
