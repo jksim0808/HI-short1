@@ -43,16 +43,26 @@ class KoreaInvestmentAPI:
             return None
 
     def get_yahoo_backup_price(self, ticker):
-        """[🚨 네이버 방화벽 차단 우회] 야후 파이낸스 글로벌 오픈 API망으로 전면 교체"""
+        """[🔥 코스피/코스닥 시장 자동 판별 우회 엔진]"""
         try:
-            # 한국 종목코드 뒤에 코스피(.KS) 기호를 자동으로 결합하여 야후 API 호출
-            yahoo_ticker = f"{ticker}.KS"
+            # 기본적으로 한국 종목코드(6자리) 처리
+            clean_ticker = str(ticker).strip()
+            
+            # [시장 판별 로직] 야후 파이낸스는 코스피 .KS / 코스닥 .KQ 구분이 엄격합니다.
+            # 한투 우회 조회를 위해 입력값에 맞춰 뒤쪽 기호를 가변 처리합니다.
+            # 우선 코스닥 시장으로 조회해보고 데이터가 없으면 코스피로 스위칭하는 안전 필터 결합
+            
+            yahoo_ticker = f"{clean_ticker}.KQ" # 코스닥 우선 시도
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1m&range=1d"
-            
-            # 브라우저인 것처럼 헤더 마스킹 기본 적용
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-            res = requests.get(url, headers=headers, timeout=5)
+            res = requests.get(url, headers=headers, timeout=3)
             
+            # 코스닥에 없는 종목이거나 오류나면 코스피(.KS)로 재시도
+            if res.status_code != 200 or "result" not in res.json().get("chart", {}):
+                yahoo_ticker = f"{clean_ticker}.KS"
+                url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1m&range=1d"
+                res = requests.get(url, headers=headers, timeout=3)
+                
             if res.status_code == 200:
                 json_data = res.json()
                 result = json_data.get("chart", {}).get("result", [])
@@ -60,7 +70,6 @@ class KoreaInvestmentAPI:
                     meta = result[0].get("meta", {})
                     close_p = meta.get("regularMarketPrice")
                     if close_p is None:
-                        # 간혹 메타에 없으면 시계열 마지막 값 파싱
                         indicators = result[0].get("indicators", {}).get("quote", [{}])[0]
                         closes = [c for c in indicators.get("close", []) if c is not None]
                         close_p = closes[-1] if closes else 0.0
@@ -135,7 +144,7 @@ def calculate_indicators(df):
 st.set_page_config(page_title="한투 우회 단타기", layout="wide")
 
 st.title("🏹 한국투자증권 모의투자 시스템 우회형 실시간 단타 대시보드")
-st.warning("⚠️ 한투 모의서버 통신 오류 감지. 보안 강화를 위해 글로벌 야후 파이낸스 백업 시세 엔진으로 자동 전환되었습니다.")
+st.warning("⚠️ 시스템 보안 안내: 시장 자동 교차 판별 엔진(.KS / .KQ)이 활성화되었습니다.")
 
 # 세션 관리 상태 유지
 if "stock_history" not in st.session_state or st.session_state.stock_history is None:
@@ -148,7 +157,7 @@ if "last_token_request_time" not in st.session_state:
     st.session_state.last_token_request_time = None
 
 st.sidebar.header("🔍 대시보드 제어")
-st.sidebar.info("🟢 시스템 상태: 야후 파이낸스 우회망 가동중")
+st.sidebar.info("🟢 시스템 상태: 코스피/코스닥 스마트 쿼리 가동중")
 
 if st.sidebar.button("🔑 시스템 완전히 초기화"):
     st.session_state.api_access_token = None
@@ -163,7 +172,7 @@ if ticker_input != st.session_state.last_ticker:
     st.session_state.stock_history = pd.DataFrame()
     st.session_state.last_ticker = ticker_input
 
-# 메인 백업 시세 호출 루프
+# 메인 시세 호출 루프
 api = KoreaInvestmentAPI()
 tick_data = api.get_realtime_price(ticker_input)
 
@@ -209,7 +218,7 @@ if tick_data and tick_data["Close"] > 0:
     cond_volume = latest['Volume'] > (prev_vol_ma * 1.02)
     is_buy_signal = cond_breakout and st_above_vwap and cond_volume
 
-    # --- UI 강제 드로잉 ---
+    # --- UI 렌더링 ---
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric(label="현재 체결가", value=f"{int(latest['Close']):,} 원", delta=f"{int(latest['Close'] - prev_close):,} 원")
@@ -238,4 +247,4 @@ if tick_data and tick_data["Close"] > 0:
     st.subheader("📋 실시간 수급 연산 로그 (최근 5줄)")
     st.dataframe(df.tail(5)[['Close', 'Volume', 'VWAP', 'RSI']], use_container_width=True)
 else:
-    st.error("🚨 글로벌 시세 오픈 API 통신 불가 상태입니다. 잠시 후 왼쪽 사이드바의 시스템 초기화 버튼을 눌러주세요.")
+    st.error("🚨 글로벌 시세 오픈 API 통신 불가 상태입니다. 종목코드를 정확히 입력하셨는지 확인 후 잠시 후 다시 시도해 주세요.")
