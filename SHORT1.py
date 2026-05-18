@@ -215,8 +215,7 @@ for ticker in st.session_state.custom_stock_pool:
     summary_rows.append({
         "종목코드": ticker,
         "종목명": get_stock_name(ticker),  
-        "현재 타이밍 신호": latest_info["타이밍 신 death"], # 내부 변수명 호환 유지
-        "타이밍_레이블": latest_info["타이밍 신호"],
+        "현재 타이밍 신호": latest_info["타이밍 신호"],  # 오류 해결: 정상 칼럼으로 수정 완료
         "현재가": int(latest_info['Close']),
         "수급선": int(latest_info['VWAP']),
         "RSI": int(latest_info["RSI"]),
@@ -236,10 +235,10 @@ if summary_rows:
         st.audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg") 
 
     for index, row in summary_df.iterrows():
-        sig = row["타이밍_레이블"]
+        sig = row["현재 타이밍 신호"]
         rank = index + 1
         
-        # 핵심 변경: 헤더에 종목명과 종목번호를 직관적으로 결합하여 동시 노출
+        # 헤더에 종목명과 종목번호 결합
         card_title = f"**[{rank}위] {row['종목명']} ({row['종목코드']})**"
         
         card_metrics = f"💰 **{row['현재가']:,}원** | RSI: `{row['RSI']}` | 📊 대금: **{int(row['실시간거래대금']/100000000):,}억**"
