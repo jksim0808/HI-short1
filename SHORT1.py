@@ -8,8 +8,9 @@ import time
 # =================================================================
 # 🔑 [모의투자 계좌 설정] Streamlit Secrets 내부 금고 연동
 # =================================================================
-APP_KEY = st.secrets["HANTU_APP_KEY"]
-APP_SECRET = st.secrets["HANTU_APP_SECRET"]
+# 배포 환경의 .streamlit/secrets.toml에 키가 등록되어 있어야 합니다.
+APP_KEY = st.secrets.get("HANTU_APP_KEY", "YOUR_APP_KEY")
+APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "YOUR_APP_SECRET")
 MOCK_FLAG = True  # 👈 모의투자 true일 때 한투 전용 tr_id가 자동 스위칭됩니다.
 
 # =================================================================
@@ -25,7 +26,7 @@ class KoreaInvestmentAPI:
         self.app_secret = APP_SECRET
 
     def get_yahoo_backup_price(self, ticker):
-        """ 한투 API 장애 또는 세션 끊김 시, 야후 파이낸스 실시간 체결가 피드를 정확히 파싱 """
+        """ 한투 API 장애 또는 토큰 소진 시, 야후 파이낸스 실시간 피드 파싱 """
         try:
             clean_ticker = str(ticker).strip()
             # 1단계: 코스닥 우선 탐색
@@ -45,10 +46,8 @@ class KoreaInvestmentAPI:
                 result = json_data.get("chart", {}).get("result", [])
                 if result:
                     meta = result[0].get("meta", {})
-                    # 과거 종가가 아닌 '현재 실시간 체결가' 데이터 취득
                     live_price = meta.get("regularMarketPrice")
                     
-                    # 만약 meta에 실시간가가 비어있다면, 1분봉의 가장 최근 종가(Close) 추적
                     if live_price is None or float(live_price) <= 0:
                         indicators = result[0].get("indicators", {}).get("quote", [{}])[0]
                         closes = [c for c in indicators.get("close", []) if c is not None and c > 0]
@@ -74,8 +73,6 @@ class KoreaInvestmentAPI:
             return self.get_yahoo_backup_price(ticker)
             
         url = f"{self.base_url}/uapi/domestic-stock/v1/quoting/inquire-price"
-        
-        # 🛠️ 모의투자와 실운영 계좌간의 실시간 조회 전용 tr_id 분기 처리 (정밀화)
         target_tr_id = "VTST01010200" if MOCK_FLAG else "FHKST01010200"
         
         headers = {
@@ -93,7 +90,6 @@ class KoreaInvestmentAPI:
                 if not res_data or res_data.get("stck_prpr") == "" or res_data.get("stck_prpr") is None:
                     return self.get_yahoo_backup_price(ticker)
                 
-                # 수신된 문자열 데이터에서 부호 및 공백을 완벽히 정제하여 순수 정수 변환
                 current_price = float(str(res_data.get("stck_prpr")).strip().replace("-", "").replace("+", ""))
                 high_price = float(str(res_data.get("stck_hgpr", current_price)).strip().replace("-", "").replace("+", ""))
                 low_price = float(str(res_data.get("stck_lwpr", current_price)).strip().replace("-", "").replace("+", ""))
@@ -113,15 +109,16 @@ class KoreaInvestmentAPI:
             return self.get_yahoo_backup_price(ticker)
 
     def get_access_token(self):
+        """ 토큰 초당 과부하 차단기가 결합된 계좌 인증 모듈 """
         if "api_access_token" in st.session_state and st.session_state.api_access_token:
             return st.session_state.api_access_token
+        
         now = datetime.now()
         if "last_token_request_time" in st.session_state and st.session_state.last_token_request_time:
-            if now - st.session_state.last_token_request_time < timedelta(minutes=1):
+            if now - st.session_state.last_token_request_time < timedelta(seconds=15): # 안전망 확보
                 return None
         st.session_state.last_token_request_time = now
         try:
-            # 토큰 발급 주소도 계좌 모드에 맞추어 자동 매핑
             url = f"{self.base_url}/oauth2/tokenP"
             headers = {"content-type": "application/json"}
             data = {"grant_type": "client_credentials", "appkey": self.app_key, "appsecret": self.app_secret}
@@ -191,7 +188,7 @@ def process_quant_signals(df):
     return df
 
 # =================================================================
-# 🖥️ 웹 대시보드 인터페이스 영역 (모바일 반응형 완결판)
+# 🖥 Ink 웰 대시보드 인터페이스 영역 (모바일 반응형 완결판)
 # =================================================================
 st.set_page_config(page_title="실시간 스캐너", layout="centered")
 
@@ -253,7 +250,6 @@ summary_rows = []
 
 # 멀티 종목 실시간 연산 체인 가동
 for ticker in st.session_state.custom_stock_pool:
-    # 최초 진입 시 실시간 시세를 초기 주춧돌(Base) 삼아 버퍼 설정
     if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
         raw_price = api.get_realtime_price(ticker)
         init_rows = []
@@ -269,7 +265,6 @@ for ticker in st.session_state.custom_stock_pool:
             })
         st.session_state.multi_market_data[ticker] = pd.DataFrame(init_rows, index=init_times)
 
-    # 매 리프레시 루프마다 실시간 대조군 주입
     live_tick = api.get_realtime_price(ticker)
     if live_tick["Close"] > 0:
         new_df = pd.DataFrame([{"Close": live_tick["Close"], "High": live_tick["High"], "Low": live_tick["Low"], "Volume": live_tick["Volume"]}], index=[pd.to_datetime(current_time_str)])
@@ -279,6 +274,7 @@ for ticker in st.session_state.custom_stock_pool:
     calculated_df = process_quant_signals(st.session_state.multi_market_data[ticker].copy())
     latest_info = calculated_df.iloc[-1]
     
+    # 💡 스케일 보정: 당일 누적 대금 연산 안전화
     realtime_trading_value = latest_info['Close'] * latest_info['Volume']
     
     signal_weight = 2
@@ -319,9 +315,12 @@ if summary_rows:
         
         card_header = f"**[{rank_idx}위] {row['종목명']}** ({row['종목코드']})"
         
+        # 억 단위 표시 조건문 에러 방지
+        display_money = int(row['실시간거래대금']/100000000) if row['실시간거래대금'] > 0 else 0
+        
         card_body = (
             f"💵 **현재가**: {row['현재가']:,}원\n\n"
-            f"🔥 **RSI**: {row['RSI']} | 📊 **대금**: {int(row['실시간거래대금']/100000000):,}억\n\n"
+            f"🔥 **RSI**: {row['RSI']} | 📊 **당일대금**: {display_money:,}억\n\n"
             f"🍏 **수급**: {row['수급선']:,}원 | 🛑 **저항**: {row['저항선']:,}원"
         )
         
