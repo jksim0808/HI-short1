@@ -21,7 +21,7 @@ class NaverFinanceAPI:
         try:
             clean_ticker = str(ticker).strip()
             url = f"https://finance.naver.com/item/main.naver?code={clean_ticker}"
-            res = requests.get(url, headers=self.headers, timeout=2.0)
+            res = requests.get(url, headers=self.headers, timeout=1.5)
             
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, "html.parser")
@@ -70,12 +70,12 @@ class NaverFinanceAPI:
             return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
 
 # =================================================================
-# 🏷️ 국내 주요 종목 코드 마스터 매핑 딕셔너리 (감시 풀 기본 확장)
+# 🏷️ 국내 주요 종목 마스터 사전 (기본 24개 자동 등록)
 # =================================================================
 STOCK_NAME_MAP = {
     "005930": "삼성전자", "000660": "SK하이닉스", "005380": "현대차", "000270": "기아",
-    "035420": "NAVER", "035720": "카카오", "068270": "셀트리온", "373220": "LG에너지솔루션",
-    "207940": "삼성바이오로직스", "051910": "LG화학", "006400": "삼성SDI", "003550": "LG",
+    "035420": "NAVER", "035720": "카카오", "068270": "셀트리온", "373220": "LG엔솔",
+    "207940": "삼바", "051910": "LG화학", "006400": "삼성SDI", "003550": "LG",
     "005490": "POSCO홀딩스", "010140": "삼성중공업", "009540": "HD현대중공업", "105560": "KB금융",
     "055550": "신한지주", "000810": "삼성화재", "015760": "한국전력", "028260": "삼성물산",
     "247540": "에코프로비엠", "086520": "에코프로", "091500": "삼성전기", "352820": "하이브"
@@ -92,7 +92,7 @@ def process_quant_signals(df):
         df['VWAP'] = df['Close']
         df['RSI'] = 50.0
         df['Local_High'] = df['High']
-        df['타이밍 신호'] = "🟢 관망(대기)"
+        df['타이밍 신호'] = "🟢 대기"
         return df
 
     typical_price = (df['High'] + df['Low'] + df['Close']) / 3
@@ -110,63 +110,53 @@ def process_quant_signals(df):
     signals = []
     for idx in range(len(df)):
         if idx < 1:
-            signals.append("🟢 관망(대기)")
+            signals.append("🟢 대기")
             continue
         c_row = df.iloc[idx]
         p_local_high = df['High'].iloc[max(0, idx-3):idx].max()
         p_vol_ma = df['Volume'].iloc[max(0, idx-3):idx].mean()
         
         if (c_row['Close'] > c_row['VWAP']) and (c_row['Close'] >= p_local_high) and (c_row['Volume'] > p_vol_ma * 1.02) and (c_row['RSI'] < 78):
-            signals.append("🔥 매수 타점!!")
+            signals.append("🔥 매수")
         elif c_row['RSI'] > 82:
-            signals.append("🚨 익절/청산")
+            signals.append("🚨 청산")
         else:
-            signals.append("🟢 관망(대기)")
+            signals.append("🟢 대기")
     df['타이밍 신호'] = signals
     return df
 
 # =================================================================
-# 🖥️ 웹 대시보드 인터페이스 영역 (모바일 반응형 최적화)
+# 🖥️ 웹 대시보드 인터페이스 영역 (모바일 초최적화 뷰)
 # =================================================================
-st.set_page_config(page_title="실시간 스캐너", layout="centered")
+st.set_page_config(page_title="스캐너", layout="centered")
 
-# 📌 초기 감시 풀 목록을 주요 대형주 24개 전체로 대폭 확장
 if "custom_stock_pool" not in st.session_state:
     st.session_state.custom_stock_pool = list(STOCK_NAME_MAP.keys())
 
 if "multi_market_data" not in st.session_state:
     st.session_state.multi_market_data = {}
 
-# 🛠️ [사이드바] 종목 입력기
-st.sidebar.markdown("### 📋 종목 번호 입력")
-st.sidebar.caption("공백이나 쉼표로 구분하여 추가 가능")
+# 🛠️ [사이드바] 모바일 컴팩트 입력기
+st.sidebar.markdown("### 📋 종목 코드 등록")
+raw_input_tickers = st.sidebar.text_area("쉼표나 공백으로 구분", placeholder="예: 005930 000660", height=70)
 
-raw_input_tickers = st.sidebar.text_area(
-    "종목코드 멀티 입력", 
-    placeholder="예: 005930 000660",
-    height=90
-)
-
-if st.sidebar.button("⚡ 종목 등록 및 동기화", use_container_width=True):
+if st.sidebar.button("⚡ 종목 등록/동기화", use_container_width=True):
     if raw_input_tickers.strip():
         parsed_tickers = raw_input_tickers.replace(",", " ").replace("\n", " ").split()
         clean_tickers = [t.strip() for t in parsed_tickers if len(t.strip()) == 6 and t.strip().isdigit()]
-        
         if clean_tickers:
-            updated_pool = list(set(st.session_state.custom_stock_pool + clean_tickers))
-            st.session_state.custom_stock_pool = updated_pool
-            st.sidebar.success(f"추가 완료!")
+            st.session_state.custom_stock_pool = list(set(st.session_state.custom_stock_pool + clean_tickers))
             st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.write(f"🔍 감시 목록 ({len(st.session_state.custom_stock_pool)}개)")
+st.sidebar.write(f"🔍 감시 중: {len(st.session_state.custom_stock_pool)}개")
 
-# 모바일 사이드바 세로 폭 폭망 방지를 위해 컴팩트 UI로 변경
+# 사이드바 리스트 컴팩트 처리
 delete_target = None
 for tk in list(st.session_state.custom_stock_pool):
     col1, col2 = st.sidebar.columns([4, 1])
     col1.caption(f"▪️ {get_stock_name(tk)}")
-    if col2.button("❌", key=f"del_{tk}", help="삭제"):
+    if col2.button("❌", key=f"del_{tk}"):
         delete_target = tk
 
 if delete_target:
@@ -175,20 +165,20 @@ if delete_target:
         del st.session_state.multi_market_data[delete_target]
     st.rerun()
 
-# 🏹 메인 모니터링 전광판
-st.markdown("### 🏹 실시간 네이버 수급 스캐너")
-st.caption(f"⏱️ 자동 갱신 중... ({datetime.now().strftime('%H:%M:%S')})")
+# 🏹 메인 모니터링 영역
+st.markdown("### 🏹 실시간 모바일 스캐너")
+st.caption(f"🔄 자동 갱신 중... ({datetime.now().strftime('%H:%M:%S')})")
 
 api = NaverFinanceAPI()
 current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-if st.button("🔑 버퍼 및 캐시 비우기 (시세 동기화 세트)", use_container_width=True):
+if st.button("🔑 버퍼 및 캐시 비우기", use_container_width=True):
     st.session_state.multi_market_data = {}
     st.rerun()
 
 summary_rows = []
 
-# 멀티 종목 실시간 연산 체인 가동
+# 멀티 종목 실시간 연산 가동
 for ticker in st.session_state.custom_stock_pool:
     if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
         raw_price = api.get_realtime_price(ticker)
@@ -209,7 +199,7 @@ for ticker in st.session_state.custom_stock_pool:
     if live_tick["Close"] > 0:
         new_df = pd.DataFrame([{"Close": live_tick["Close"], "High": live_tick["High"], "Low": live_tick["Low"], "Volume": live_tick["Volume"]}], index=[pd.to_datetime(current_time_str)])
         st.session_state.multi_market_data[ticker] = pd.concat([st.session_state.multi_market_data[ticker], new_df])
-        st.session_state.multi_market_data[ticker] = st.session_state.multi_market_data[ticker].loc[~st.session_state.multi_market_data[ticker].index.duplicated(keep='last')].tail(15)
+        st.session_state.multi_market_data[ticker] = st.session_state.multi_market_data[ticker].loc[~st.session_state.multi_market_data[ticker].index.duplicated(keep='last')].tail(12)
 
     calculated_df = process_quant_signals(st.session_state.multi_market_data[ticker].copy())
     latest_info = calculated_df.iloc[-1]
@@ -217,9 +207,9 @@ for ticker in st.session_state.custom_stock_pool:
     realtime_trading_value = latest_info['Close'] * latest_info['Volume']
     
     signal_weight = 2
-    if latest_info["타이밍 신호"] == "🔥 매수 타점!!":
+    if latest_info["타이밍 신호"] == "🔥 매수":
         signal_weight = 0
-    elif latest_info["타이밍 신호"] == "🚨 익절/청산":
+    elif latest_info["타이밍 신호"] == "🚨 청산":
         signal_weight = 1
 
     summary_rows.append({
@@ -236,47 +226,48 @@ for ticker in st.session_state.custom_stock_pool:
 
 st.markdown("---")
 
-# 실시간 시세 보드 정렬 및 렌더링 (최대 20위까지 노출)
+# 스마트폰 화면 맞춤형 순위 보드 렌더링
 if summary_rows:
     summary_df = pd.DataFrame(summary_rows)
-    summary_df = summary_df.sort_values(
-        by=['신호가중치', '실시간거래대금'], 
-        ascending=[True, False]
-    ).head(20).reset_index(drop=True)  # 📊 최대 20개 종목 순위 정렬 고정
+    # 매수 -> 청산 -> 거래대금 순 정렬 후 상위 20개 타이트 고정
+    summary_df = summary_df.sort_values(by=['신호가중치', '실시간거래대금'], ascending=[True, False]).head(20).reset_index(drop=True)
     
-    has_buy_signal = not summary_df[summary_df["신호가중치"] == 0].empty
-    if has_buy_signal:
+    if not summary_df[summary_df["신호가중치"] == 0].empty:
         st.audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg") 
 
     for index, row in summary_df.iterrows():
         sig = row["현재 타이밍 신호"]
-        rank_idx = index + 1
+        rank = index + 1
         
-        card_header = f"**[{rank_idx}위] {row['종목명']}** ({row['종목코드']})"
+        # 모바일 가로폭 폭망 방지용 컴팩트 문자열 조립
+        card_title = f"**[{rank}위] {row['종목명']}** `{row['종목코드']}`"
+        card_metrics = f"💰 **{row['현재가']:,}원** | RSI: `{row['RSI']}` | 📊 대금: **{int(row['실시간거래대금']/100000000):,}억**"
+        card_sub_metrics = f"🍏 수급: {row['수급선']:,}원 / 🛑 저항: {row['저항선']:,}원"
         
-        card_body = (
-            f"💵 **현재가**: {row['현재가']:,}원\n\n"
-            f"🔥 **RSI**: {row['RSI']} | 📊 **대금**: {int(row['실시간거래대금']/100000000):,}억\n\n"
-            f"🍏 **수급**: {row['수급선']:,}원 | 🛑 **저항**: {row['저항선']:,}원"
-        )
-        
-        if sig == "🔥 매수 타점!!":
+        # 상태별 카드 컨테이너 컬러 분기
+        if sig == "🔥 매수":
             with st.container():
-                st.error(f"🎯 **{sig}**\n\n{card_header}")
-                st.markdown(card_body)
+                st.error(f"🎯 **{sig} 타점!** │ {card_title}")
+                st.markdown(card_metrics)
+                st.caption(card_sub_metrics)
+                st.markdown("<div style='margin-bottom:-5px;'></div>", unsafe_allow_html=True)
                 st.markdown("---")
-        elif sig == "🚨 익절/청산":
+        elif sig == "🚨 청산":
             with st.container():
-                st.warning(f"🚨 **{sig}**\n\n{card_header}")
-                st.markdown(card_body)
+                st.warning(f"🚨 **{sig}/익절** │ {card_title}")
+                st.markdown(card_metrics)
+                st.caption(card_sub_metrics)
+                st.markdown("<div style='margin-bottom:-5px;'></div>", unsafe_allow_html=True)
                 st.markdown("---")
         else:
             with st.container():
-                st.success(f"🍏 **{sig}**\n\n{card_header}")
-                st.markdown(card_body)
+                st.success(f"🟢 **{sig} 대기** │ {card_title}")
+                st.markdown(card_metrics)
+                st.caption(card_sub_metrics)
+                st.markdown("<div style='margin-bottom:-5px;'></div>", unsafe_allow_html=True)
                 st.markdown("---")
 else:
-    st.info("💡 종목 번호들을 등록하시면 분석이 시작됩니다.")
+    st.info("💡 오른쪽 상단 사이드바 버튼을 열어 종목을 추가해 주세요.")
 
 # =================================================================
 # 🔄 초단위 자동 리프레시 루프 (1.2초 인터벌)
