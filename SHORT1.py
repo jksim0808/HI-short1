@@ -10,24 +10,26 @@ import time
 # =================================================================
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "YOUR_APP_KEY")
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "YOUR_APP_SECRET")
-MOCK_FLAG = False  # 👈 실전투자용 고정
+MOCK_FLAG = False  # 👈 실전투자용 고정 (True로 변경 금지)
 
 # =================================================================
 # 🏦 한국투자증권 실전 API & 야후 파이낸스 실시간 정밀 연동 엔진
 # =================================================================
 class KoreaInvestmentAPI:
     def __init__(self):
-        self.base_url = "https://openapi.koreainvestment.com:9443"
+        # 실전투자 표준 도메인 (포트 미포함 주소 체계로 기본 설정)
+        self.base_url = "https://openapi.koreainvestment.com"
         self.app_key = APP_KEY
         self.app_secret = APP_SECRET
 
     def get_access_token(self):
-        """ 토큰 발급 에러 발생 시 화면에 즉시 원인 출력 """
+        """ 토큰 발급 세션 캐싱 및 에러 트래킹 모듈 """
         if "api_access_token" in st.session_state and st.session_state.api_access_token:
             return st.session_state.api_access_token
         
         try:
-            url = f"{self.base_url}/oauth2/tokenP"
+            # 토큰 발급은 포트 없이 표준 도메인 결합
+            url = f"{self.base_url.strip('/')}/oauth2/tokenP"
             headers = {"content-type": "application/json"}
             data = {"grant_type": "client_credentials", "appkey": self.app_key, "appsecret": self.app_secret}
             response = requests.post(url, headers=headers, json=data)
@@ -44,13 +46,14 @@ class KoreaInvestmentAPI:
             return None
 
     def get_realtime_price(self, ticker):
-        """ 실전 현재가 조회 및 실패 시 원인 추적 스케너 """
+        """ [404 오동작 정밀 교정] 실전 시세 쿼리 파이프라인 """
         access_token = self.get_access_token()
         if not access_token:
-            return self.get_yahoo_backup_price(ticker, "한투 토큰 부재로 인한 백업")
+            return self.get_yahoo_backup_price(ticker, "한투 토큰 부재")
             
-        url = f"{self.base_url}/uapi/domestic-stock/v1/quoting/inquire-price"
-        target_tr_id = "FHKST01010200"  # 실전투자 전용 호가 TR ID
+        # ⚠️ 슬래시 중복 및 누락 방지를 위한 안전한 주소 조립
+        url = f"{self.base_url.strip('/')}/uapi/domestic-stock/v1/quoting/inquire-price"
+        target_tr_id = "FHKST01010200"  # 실전투자 현재가 주식호가 전용 TR ID
         
         headers = {
             "content-type": "application/json; charset=utf-8",
@@ -68,14 +71,18 @@ class KoreaInvestmentAPI:
         try:
             response = requests.get(url, headers=headers, params=params, timeout=3.0)
             
+            # 만약 표준 주소에서 404가 발생하면, 포트포워딩 규격(:9443) 버전으로 즉시 재시도(Failover)
+            if response.status_code == 404:
+                backup_url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quoting/inquire-price"
+                response = requests.get(backup_url, headers=headers, params=params, timeout=3.0)
+
             if response.status_code == 200:
                 res_json = response.json()
-                # 한투 시스템 내부 에러 메시지 검증 (해외 IP 차단 등은 여기서 걸림)
                 rt_cd = res_json.get("rt_cd", "0")
                 msg1 = res_json.get("msg1", "").strip()
                 
                 if rt_cd != "0":
-                    st.error(f"⚠️ [한투 데이터 거절 - 종목 {ticker}] 코드: {rt_cd} | 메시지: {msg1}")
+                    st.error(f"⚠️ [한투 데이터 거절 - {ticker}] 코드: {rt_cd} | 메시지: {msg1}")
                     return self.get_yahoo_backup_price(ticker, f"한투 거절 ({msg1})")
 
                 res_data = res_json.get("output", {})
@@ -94,15 +101,15 @@ class KoreaInvestmentAPI:
                             "Source": "한국투자증권 실전"
                         }
             else:
-                st.error(f"❌ [한투 시세 API 실패] 상태코드: {response.status_code} | 내용: {response.text}")
+                st.error(f"❌ [한투 시세 API 최종 실패] 상태코드: {response.status_code} | 요청 경로 오접근")
             
             return self.get_yahoo_backup_price(ticker, f"HTTP 에러 {response.status_code}")
         except Exception as e:
-            st.error(f"💥 [한투 시세 통신 실패 - 종목 {ticker}]: {str(e)}")
-            return self.get_yahoo_backup_price(ticker, f"통신 예외 발생")
+            st.error(f"💥 [한투 시세 통신 예외 발생 - {ticker}]: {str(e)}")
+            return self.get_yahoo_backup_price(ticker, f"통신 예외")
 
     def get_yahoo_backup_price(self, ticker, reason=""):
-        """ 한투 연동 실패 시 어떤 사유로 야후로 튕겼는지 표기 추가 """
+        """ 한투 차단 시 실시간 수급 연산을 백업하기 위한 야후 라우팅 시스템 """
         try:
             clean_ticker = str(ticker).strip()
             yahoo_ticker = f"{clean_ticker}.KQ"
@@ -136,9 +143,9 @@ class KoreaInvestmentAPI:
                             "Volume": float(meta.get("regularMarketVolume", 250000.0)),
                             "Source": f"야후 백업 ({reason})"
                         }
-            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0, "Source": "데이터 없음"}
+            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0, "Source": "데이터 오류"}
         except:
-            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0, "Source": "데이터 없음"}
+            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0, "Source": "데이터 오류"}
 
 # =================================================================
 # 🏷️ 국내 주요 대형주 및 핵심 종목 마스터 딕셔너리
