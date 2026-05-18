@@ -230,7 +230,7 @@ else:
     st.info("💡 종목 데이터를 불러오는 중입니다.")
 
 # 딜레이 없이 무제한 초고속 루프 가동
-st.rerun()import streamlit as st
+st.rerun()
 import pandas as pd
 import numpy as np
 import requests
