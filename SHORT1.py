@@ -8,23 +8,21 @@ import time
 # =================================================================
 # 🔑 [실전투자 계좌 설정] Streamlit Secrets 내부 금고 연동
 # =================================================================
-# ⚠️ 반드시 한국투자증권 '실전투자용' App Key와 Secret Key를 Secrets에 넣으셔야 합니다.
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "YOUR_APP_KEY")
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "YOUR_APP_SECRET")
-MOCK_FLAG = False  # 👈 실전투자용 강제 스위칭 (False 고정)
+MOCK_FLAG = False  # 👈 실전투자용 고정
 
 # =================================================================
 # 🏦 한국투자증권 실전 API & 야후 파이낸스 실시간 정밀 연동 엔진
 # =================================================================
 class KoreaInvestmentAPI:
     def __init__(self):
-        # 실전투자 전용 도메인 고정
         self.base_url = "https://openapi.koreainvestment.com:9443"
         self.app_key = APP_KEY
         self.app_secret = APP_SECRET
 
     def get_access_token(self):
-        """ 실전 토큰 세션 캐싱 및 실시간 갱신 모듈 """
+        """ 토큰 발급 에러 발생 시 화면에 즉시 원인 출력 """
         if "api_access_token" in st.session_state and st.session_state.api_access_token:
             return st.session_state.api_access_token
         
@@ -33,23 +31,26 @@ class KoreaInvestmentAPI:
             headers = {"content-type": "application/json"}
             data = {"grant_type": "client_credentials", "appkey": self.app_key, "appsecret": self.app_secret}
             response = requests.post(url, headers=headers, json=data)
+            
             if response.status_code == 200:
                 token = response.json().get("access_token")
                 st.session_state.api_access_token = token
                 return token
-            return None
-        except:
+            else:
+                st.error(f"❌ [한투 토큰 발급 실패] 상태코드: {response.status_code} | 내용: {response.text}")
+                return None
+        except Exception as e:
+            st.error(f"💥 [토큰 시스템 통신 에러]: {str(e)}")
             return None
 
     def get_realtime_price(self, ticker):
-        """ 실전투자 실시간 호가/체결 데이터 수신 및 백업 체인 구문 """
+        """ 실전 현재가 조회 및 실패 시 원인 추적 스케너 """
         access_token = self.get_access_token()
         if not access_token:
-            return self.get_yahoo_backup_price(ticker)
+            return self.get_yahoo_backup_price(ticker, "한투 토큰 부재로 인한 백업")
             
-        # 실전투자용 국내주식 현재가 조회 표준 엔드포인트
         url = f"{self.base_url}/uapi/domestic-stock/v1/quoting/inquire-price"
-        target_tr_id = "FHKST01010200"  # 👈 실전투자 전용 TR_ID 고정
+        target_tr_id = "FHKST01010200"  # 실전투자 전용 호가 TR ID
         
         headers = {
             "content-type": "application/json; charset=utf-8",
@@ -57,7 +58,7 @@ class KoreaInvestmentAPI:
             "appkey": self.app_key,
             "appsecret": self.app_secret,
             "tr_id": target_tr_id,
-            "custtype": "P"  # 개인고객 고정
+            "custtype": "P"
         }
         params = {
             "FID_COND_MRKT_DIV_CODE": "J", 
@@ -66,10 +67,19 @@ class KoreaInvestmentAPI:
         
         try:
             response = requests.get(url, headers=headers, params=params, timeout=3.0)
+            
             if response.status_code == 200:
-                res_data = response.json().get("output", {})
+                res_json = response.json()
+                # 한투 시스템 내부 에러 메시지 검증 (해외 IP 차단 등은 여기서 걸림)
+                rt_cd = res_json.get("rt_cd", "0")
+                msg1 = res_json.get("msg1", "").strip()
+                
+                if rt_cd != "0":
+                    st.error(f"⚠️ [한투 데이터 거절 - 종목 {ticker}] 코드: {rt_cd} | 메시지: {msg1}")
+                    return self.get_yahoo_backup_price(ticker, f"한투 거절 ({msg1})")
+
+                res_data = res_json.get("output", {})
                 if res_data and res_data.get("stck_prpr"):
-                    # 데이터 전처리 (+/- 부호 및 특수문자 정제)
                     current_price = float(str(res_data.get("stck_prpr")).strip().replace("-", "").replace("+", ""))
                     high_price = float(str(res_data.get("stck_hgpr", current_price)).strip().replace("-", "").replace("+", ""))
                     low_price = float(str(res_data.get("stck_lwpr", current_price)).strip().replace("-", "").replace("+", ""))
@@ -80,20 +90,24 @@ class KoreaInvestmentAPI:
                             "Close": current_price,
                             "High": high_price if high_price > 0 else current_price,
                             "Low": low_price if low_price > 0 else current_price,
-                            "Volume": volume if volume > 0 else 1000.0
+                            "Volume": volume if volume > 0 else 1000.0,
+                            "Source": "한국투자증권 실전"
                         }
-            # 한투 과부하 대기 발생 시 야후 실시간 피드로 즉시 유연하게 스위칭
-            return self.get_yahoo_backup_price(ticker)
-        except:
-            return self.get_yahoo_backup_price(ticker)
+            else:
+                st.error(f"❌ [한투 시세 API 실패] 상태코드: {response.status_code} | 내용: {response.text}")
+            
+            return self.get_yahoo_backup_price(ticker, f"HTTP 에러 {response.status_code}")
+        except Exception as e:
+            st.error(f"💥 [한투 시세 통신 실패 - 종목 {ticker}]: {str(e)}")
+            return self.get_yahoo_backup_price(ticker, f"통신 예외 발생")
 
-    def get_yahoo_backup_price(self, ticker):
-        """ 비상용 야후 파이낸스 실시간 시세 트래킹 피드 """
+    def get_yahoo_backup_price(self, ticker, reason=""):
+        """ 한투 연동 실패 시 어떤 사유로 야후로 튕겼는지 표기 추가 """
         try:
             clean_ticker = str(ticker).strip()
             yahoo_ticker = f"{clean_ticker}.KQ"
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1m&range=1d"
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
             res = requests.get(url, headers=headers, timeout=2.0)
             
             if res.status_code != 200 or "result" not in res.json().get("chart", {}):
@@ -119,11 +133,12 @@ class KoreaInvestmentAPI:
                             "Close": final_p,
                             "High": float(meta.get("fiftyTwoWeekHigh", final_p * 1.002)),
                             "Low": float(meta.get("fiftyTwoWeekLow", final_p * 0.998)),
-                            "Volume": float(meta.get("regularMarketVolume", 250000.0))
+                            "Volume": float(meta.get("regularMarketVolume", 250000.0)),
+                            "Source": f"야후 백업 ({reason})"
                         }
-            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
+            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0, "Source": "데이터 없음"}
         except:
-            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0}
+            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0, "Source": "데이터 없음"}
 
 # =================================================================
 # 🏷️ 국내 주요 대형주 및 핵심 종목 마스터 딕셔너리
@@ -140,9 +155,6 @@ STOCK_NAME_MAP = {
 def get_stock_name(ticker):
     return STOCK_NAME_MAP.get(ticker, f"종목({ticker})")
 
-# =================================================================
-# 📊 퀀트 시계열 연산 코어 엔진 (VWAP, RSI, 고가 저항 스캔)
-# =================================================================
 def process_quant_signals(df):
     if len(df) < 2:
         df['VWAP'] = df['Close']
@@ -172,7 +184,6 @@ def process_quant_signals(df):
         p_local_high = df['High'].iloc[max(0, idx-3):idx].max()
         p_vol_ma = df['Volume'].iloc[max(0, idx-3):idx].mean()
         
-        # 🏹 거래량 분출 + 직전 3분봉 최고가 돌파 + VWAP 수급선 상회 조건 충족시 매수 신호
         if (c_row['Close'] > c_row['VWAP']) and (c_row['Close'] >= p_local_high) and (c_row['Volume'] > p_vol_ma * 1.02) and (c_row['RSI'] < 78):
             signals.append("🔥 매수 타점!!")
         elif c_row['RSI'] > 82:
@@ -193,7 +204,6 @@ if "custom_stock_pool" not in st.session_state:
 if "multi_market_data" not in st.session_state:
     st.session_state.multi_market_data = {}
 
-# 🛠️ [사이드바] 실시간 감시 종목 추가/삭제 
 st.sidebar.markdown("### 📋 종목 번호 입력")
 raw_input_tickers = st.sidebar.text_area("종목코드 멀티 입력", placeholder="예: 005930 000660", height=90)
 
@@ -220,7 +230,6 @@ if delete_target:
     if delete_target in st.session_state.multi_market_data: del st.session_state.multi_market_data[delete_target]
     st.rerun()
 
-# 🎯 메인 대시보드 스캔 현황판
 st.markdown("### 🏹 실전 수급 돌파 스캐너")
 st.caption(f"⏱️ 실시간 거래소 동기화 중... ({datetime.now().strftime('%H:%M:%S')})")
 
@@ -234,7 +243,6 @@ if st.button("🔑 버퍼 및 캐시 비우기 (오류 초기화)", use_containe
 
 summary_rows = []
 
-# 멀티 종목 실시간 연산 체인 가동
 for ticker in st.session_state.custom_stock_pool:
     if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
         raw_price = api.get_realtime_price(ticker)
@@ -258,7 +266,6 @@ for ticker in st.session_state.custom_stock_pool:
     calculated_df = process_quant_signals(st.session_state.multi_market_data[ticker].copy())
     latest_info = calculated_df.iloc[-1]
     
-    # 💡 실제 당일 누적 거래대금 산출
     realtime_trading_value = latest_info['Close'] * latest_info['Volume']
     
     signal_weight = 2
@@ -268,23 +275,22 @@ for ticker in st.session_state.custom_stock_pool:
     summary_rows.append({
         "종목코드": ticker, "종목명": get_stock_name(ticker), "현재 타이밍 신호": latest_info["타이밍 신호"],
         "현재가": int(latest_info['Close']), "수급선": int(latest_info['VWAP']), "RSI": int(latest_info["RSI"]),
-        "저항선": int(latest_info['Local_High']), "실시간거래대금": realtime_trading_value, "신호가중치": signal_weight
+        "저항선": int(latest_info['Local_High']), "실시간거래대금": realtime_trading_value, "신호가중치": signal_weight,
+        "데이터출처": live_tick.get("Source", "알 수 없음")
     })
 
 st.markdown("---")
 
-# 수급 신호 포착 및 정렬 렌더링
 if summary_rows:
     summary_df = pd.DataFrame(summary_rows).sort_values(by=['신호가중치', '실시간거래대금'], ascending=[True, False]).reset_index(drop=True)
     
-    # 매수 신호 발생 시 시스템 알림음 재생
     if not summary_df[summary_df["신호가중치"] == 0].empty:
         st.audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg") 
 
     for index, row in summary_df.iterrows():
         sig = row["현재 타이밍 신호"]
         rank_idx = index + 1
-        card_header = f"**[{rank_idx}위] {row['종목명']}** ({row['종목코드']})"
+        card_header = f"**[{rank_idx}위] {row['종목명']}** ({row['종목코드']}) | 📌 `출처: {row['데이터출처']}`"
         display_money = int(row['실시간거래대금']/100000000) if row['실시간거래대금'] > 0 else 0
         
         card_body = (
@@ -303,6 +309,5 @@ if summary_rows:
             with st.container():
                 st.success(f"🍏 **{sig}**\n\n{card_header}"); st.markdown(card_body); st.markdown("---")
 
-# 🔄 1.2초 대기 후 페이지 무한 리프레시 메커니즘
 time.sleep(1.2)
 st.rerun()
