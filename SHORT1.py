@@ -170,7 +170,7 @@ def process_quant_signals(df):
     df['타이밍 신호'] = signals
     return df
 
-# --- 웹 대시보드 인터페이스 초기화 및 설정 (모바일 뷰 최적화) ---
+# --- 웹 대시보드 인터페이스 초기화 및 설정 ---
 st.set_page_config(page_title="모바일 단타 스캐너", layout="centered")
 
 st.markdown("### 🏹 실시간 주도 섹터 수급 스캐너")
@@ -182,7 +182,6 @@ if "multi_market_data" not in st.session_state:
 api = KoreaInvestmentAPI()
 current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-# 상단 조작 버튼 모바일 크기로 축소 배치
 col_btn1, col_btn2 = st.columns(2)
 with col_btn1:
     scan_trigger = st.button("🔄 실시간 스캔", use_container_width=True)
@@ -209,7 +208,6 @@ for sector_name, stocks in SECTOR_MASTER.items():
 
 sorted_sectors = sorted(sector_volumes.items(), key=lambda x: x[1], reverse=True)
 
-# 📱 모바일 상단 접이식(Expander) 메뉴로 업종 순위 간결화
 with st.expander("📊 현재 업종 수급 순위 보기"):
     for rank, (sec_name, vol) in enumerate(sorted_sectors, 1):
         st.write(f"**{rank}위** : {sec_name} ({int(vol/100000000):,}억)")
@@ -260,6 +258,13 @@ for ticker in flat_ticker_list:
     
     sector_rank = [i for i, (s_name, _) in enumerate(sorted_sectors) if s_name == belonging_sector][0]
     
+    # 정렬용 신호 가중치 부여 (매수타점=0순위, 익절=1순위, 관망=2순위)
+    signal_weight = 2
+    if latest_info["타이밍 신호"] == "🔥 매수 타점!!":
+        signal_weight = 0
+    elif latest_info["타이밍 신호"] == "🚨 익절/청산":
+        signal_weight = 1
+
     summary_rows.append({
         "소속 업종": belonging_sector,
         "종목코드": ticker,
@@ -270,20 +275,24 @@ for ticker in flat_ticker_list:
         "RSI": int(latest_info["RSI"]),
         "저항선": int(latest_info['Local_High']),
         "업종순위가중치": sector_rank,
-        "신호가중치": {"🔥 매수 타점!!": 0, "🚨 익절/청산": 1, "🟢 관망(대기)": 2}[latest_info["타이밍 신호"]]
+        "신호가중치": signal_weight
     })
 
 summary_df = pd.DataFrame(summary_rows)
+# 🌟 [정렬 엔진 적용] 신호가중치(0순위가 최상단)를 기준으로 정렬한 뒤 업종 순위별로 2차 정렬합니다.
 summary_df = summary_df.sort_values(by=['신호가중치', '업종순위가중치']).reset_index(drop=True)
 
-# --- 📱 [모바일 고도화 핵심] 카드형 리스트 렌더링 시스템 ---
+# --- 카드형 리스트 순차 출력 ---
 st.markdown("---")
 
+# 매수 타점이 존재하는지 체크하기 위한 플래그
+has_buy_signal = not summary_df[summary_df["신호가중치"] == 0].empty
+
+if has_buy_signal:
+    st.audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg") # 타점 발생 시 가벼운 알림음 효과 (브라우저 지원 시 재생)
+
 for index, row in summary_df.iterrows():
-    # 신호별로 가독성 좋은 모바일용 테두리/에러박스 색상 지정
     sig = row["현재 타이밍 신호"]
-    
-    # 정보 텍스트 포맷팅
     card_header = f"**{row['종목명']}** ({row['종목코드']}) ｜ {row['소속 업종']}"
     card_body = f"💰 **현재가**: {row['현재가']:,}원 ｜ 📈 **RSI**: {row['RSI']}\n\n🍏 **수급선(VWAP)**: {row['수급선']:,}원 ｜ 🛑 **저항선**: {row['저항선']:,}원"
     
