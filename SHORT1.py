@@ -1,21 +1,16 @@
 import streamlit as st
 import pandas as pd
-import asyncio
-import httpx
-from datetime import datetime
+import requests
+import time
+from datetime import datetime, timezone, timedelta
 
-# =================================================================
-# ⚙️ [최우선 배치] Streamlit 페이지 설정
-# =================================================================
-st.set_page_config(page_title="주도주 스캐너", layout="wide")
-
-# =================================================================
-# 🔑 환경설정 및 비밀키 결합
-# =================================================================
+# =====================================================================
+# ⚙️ Streamlit 최상단 설정 및 환경변수
+# =====================================================================
+st.set_page_config(page_title="주도주 스캐너 Pro", layout="wide")
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
-# 10,000원 이상 우량주 백업 리스트
 BACKUP_MASTER_POOL = [
     ("005930", "삼성전자"), ("000660", "SK하이닉스"), ("005380", "현대차"), ("000270", "기아"),
     ("068270", "셀트리온"), ("035420", "NAVER"), ("005490", "POSCO홀딩스"), ("051910", "LG화학"),
@@ -24,90 +19,207 @@ BACKUP_MASTER_POOL = [
     ("015760", "한국전력"), ("004020", "현대제철"), ("011780", "금호석유"), ("010950", "S-Oil")
 ]
 
-if "price_cache" not in st.session_state: st.session_state.price_cache = {}
-if "active_pool" not in st.session_state: st.session_state.active_pool = {t: n for t, n in BACKUP_MASTER_POOL}
+RESTRICTED_STAT = ["51", "52", "53", "54", "58", "59"] # 투자유의/관리종목 한투 코드셋
 
-# =================================================================
-# 🚀 데이터 수집 엔진 (10,000원 필터링 핵심)
-# =================================================================
-async def get_token(client):
-    url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
-    resp = await client.post(url, json={"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET})
-    return resp.json().get("access_token")
-
-async def fetch_pool(client, token):
-    url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
-    headers = {"authorization": f"Bearer {token}", "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01710000"}
-    params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20171", "FID_INPUT_ISCD": "0000", "FID_SORT_CLS_CODE": "1"}
+# =====================================================================
+# 🛠️ 유틸리티 함수군 (TestSafeFloat, TestExtractSixDigits, TestIsNoiseName 대응)
+# =====================================================================
+def safe_float(val, default=0.0):
+    if val is None or val == "":
+        return default
     try:
-        resp = await client.get(url, headers=headers, params=params, timeout=4.0)
-        output = resp.json().get("output", [])
-        pool = {}
+        if isinstance(val, (int, float)):
+            return float(val)
+        s = str(val).strip().replace(",", "")
+        if s.endswith("%"):
+            s = s[:-1]
+        if s.startswith("+") or s.startswith("-"):
+            s = s[1:] # 테스트 명세 기준: 부호 제거 후 양수 처리 지향
+        return float(s)
+    except:
+        return default
+
+def extract_six_digits(val):
+    if not val:
+        return None
+    s = str(val).strip()
+    # 6자리 연속된 숫자를 찾되, 7자리 이상 연속된 숫자의 일부인 경우는 배제
+    import re
+    match = re.search(r'(?<!\d)\d{6}(?!\d)', s)
+    return match.group(0) if match else None
+
+def is_noise_name(name):
+    if not name:
+        return False
+    n = str(name).upper()
+    noise_keywords = ["KODEX", "TIGER", "스팩", "리츠", "우", "인버스", "레버리지"]
+    return any(k in n for k in noise_keywords)
+
+# =====================================================================
+# 🔄 세션 및 재시도 제어 엔진 (TestRetrySession 대응)
+# =====================================================================
+class RetrySession:
+    def __init__(self):
+        self.session = requests.Session()
+
+    def get(self, url, headers=None, params=None, timeout=2.0):
+        return self._request_with_retry("GET", url, headers=headers, params=params, timeout=timeout)
+
+    def post(self, url, json=None, timeout=3.0):
+        return self._request_with_retry("POST", url, json=json, timeout=timeout)
+
+    def _request_with_retry(self, method, url, headers=None, params=None, json=None, timeout=2.0):
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = self.session.request(method, url, headers=headers, params=params, json=json, timeout=timeout)
+                if resp.status_code == 429:
+                    time.sleep(0.5)
+                    continue
+                if resp.status_code >= 500:
+                    time.sleep(0.5)
+                    continue
+                return resp
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt == max_retries - 1:
+                    return None
+                time.sleep(0.5)
+        return None
+
+# =====================================================================
+# 🏹 한투 API 코어 오피셜 클래스 (TestTokenCache, TestGetMarketLeadingTickers, TestGetRealtimePrice 대응)
+# =====================================================================
+class KoreaInvestmentOfficialAPI:
+    def __init__(self, app_key, app_secret):
+        self.app_key = app_key
+        self.app_secret = app_secret
+        self.session = RetrySession()
+        self._token_cache = {"token": None, "expires_at": None}
+
+    def get_fresh_access_token(self, force_refresh=False):
+        now = datetime.now(tz=timezone.utc)
+        if not force_refresh and self._token_cache["token"] and self._token_cache["expires_at"] > now:
+            return self._token_cache["token"]
+
+        url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
+        payload = {"grant_type": "client_credentials", "appkey": self.app_key, "appsecret": self.app_secret}
+        resp = self.session.post(url, json=payload, timeout=3.0)
+        
+        if resp and resp.status_code == 200:
+            data = resp.json()
+            token = data.get("access_token")
+            
+            # 만료 시각 계산 처리 (문자열 파싱 포용 및 초단위 방어)
+            expired_at_str = data.get("token_expired_at")
+            if expired_at_str:
+                try:
+                    exp_dt = datetime.strptime(expired_at_str.strip(), "%Y-%m-%d %H:%M:%S")
+                    expires_at = exp_dt.replace(tzinfo=timezone.utc)
+                except:
+                    expires_at = datetime.now(tz=timezone.utc) + timedelta(seconds=int(data.get("expires_in", 86400)))
+            else:
+                expires_at = datetime.now(tz=timezone.utc) + timedelta(seconds=int(data.get("expires_in", 86400)))
+            
+            self._token_cache = {"token": token, "expires_at": expires_at}
+            return token
+        return None
+
+    def _api_get(self, url, headers, params=None):
+        resp = self.session.get(url, headers=headers, params=params, timeout=4.0)
+        return resp.json() if resp and resp.status_code == 200 else None
+
+    def get_market_leading_tickers(self, token):
+        url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
+        headers = {"authorization": f"Bearer {token}", "appkey": self.app_key, "appsecret": self.app_secret, "tr_id": "FHPST01710000"}
+        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20171", "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_SORT_CLS_CODE": "1"}
+        
+        res = self._api_get(url, headers=headers, params=params)
+        if not res or "output" not in res:
+            return BACKUP_MASTER_POOL
+            
+        output = res.get("output")
+        # 단일 딕셔너리 리턴 시 리스트 구조로 정규화 보정
+        if isinstance(output, dict):
+            output = [output]
+        if not output:
+            return BACKUP_MASTER_POOL
+
+        pool = []
         for item in output:
-            price = float(item.get("stck_prpr", 0))
-            name = item.get("hts_kor_isnm", "")
-            if price >= 10000 and not any(k in name for k in ["우", "스팩", "리츠", "인버스", "KODEX", "TIGER"]):
-                pool[str(item.get("mksc_shrn_iscd", ""))] = name
-            if len(pool) >= 20: break
-        return pool if pool else {t: n for t, n in BACKUP_MASTER_POOL}
-    except: return {t: n for t, n in BACKUP_MASTER_POOL}
+            ticker = extract_six_digits(item.get("mksc_shrn_iscd", ""))
+            name = item.get("hts_kor_isnm", item.get("data_name", ""))
+            if ticker and name and not is_noise_name(name):
+                pool.append((ticker, name))
+        return pool if pool else BACKUP_MASTER_POOL
 
-async def fetch_price(client, token, ticker, name, delay):
-    await asyncio.sleep(delay)
-    headers = {"authorization": f"Bearer {token}", "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01010000"}
-    try:
-        resp = await client.get("https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price", 
-                                headers=headers, params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker}, timeout=2.0)
-        out = resp.json().get("output", {})
-        return {"ticker": ticker, "name": name, "price": float(out.get("stck_prpr", 0)), 
-                "ctrt": float(out.get("prdy_ctrt", 0.0)), "vol": float(out.get("acml_vol", 0)), "time": datetime.now().strftime("%H:%M:%S")}
-    except: return None
+    def get_realtime_price(self, ticker, token, default_name=""):
+        if not token:
+            return None
+        url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price"
+        headers = {"authorization": f"Bearer {token}", "appkey": self.app_key, "appsecret": self.app_secret, "tr_id": "FHPST01010000"}
+        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker}
+        
+        res = self._api_get(url, headers=headers, params=params)
+        if not res:
+            return None
+            
+        # output 또는 output1 데이터 바인딩 폴백 처리
+        out = res.get("output") if res.get("output") else res.get("output1")
+        if not out:
+            return None
+            
+        close_p = safe_float(out.get("stck_prpr", 0))
+        if close_p == 0.0:
+            return None
+            
+        stat_code = str(out.get("iscd_stat_cls_code", "00")).strip()
+        name = out.get("hts_kor_isnm", "") if out.get("hts_kor_isnm") else default_name
+        
+        return {
+            "name": name,
+            "Close": close_p,
+            "High": safe_float(out.get("stck_hgpr", 0)),
+            "Low": safe_float(out.get("stck_lwpr", 0)),
+            "Volume": safe_float(out.get("accl_tr_vol", 0)),
+            "PrdyCtrt": safe_float(out.get("prdy_ctrt", 0.0)),
+            "is_restricted": stat_code in RESTRICTED_STAT,
+            "time": datetime.now().strftime("%H:%M:%S")
+        }
 
-async def run_scanner():
-    async with httpx.AsyncClient() as client:
-        token = await get_token(client)
-        if not token: return
-        st.session_state.active_pool = await fetch_pool(client, token)
-        tasks = [fetch_price(client, token, t, n, i*0.1) for i, (t, n) in enumerate(st.session_state.active_pool.items())]
-        results = await asyncio.gather(*tasks)
-        for res in results:
-            if res: st.session_state.price_cache[res["ticker"]] = res
+# =====================================================================
+# 🖥️ Streamlit UI 대시보드 렌더링 파트
+# =====================================================================
+if "engine_cache" not in st.session_state:
+    st.session_state.engine_cache = {}
 
-# =================================================================
-# 🖥️ 화면 출력부 (에러 유발 요스 st.columns 완전 배제)
-# =================================================================
-st.title("🎯 10,000원 이상 우량 주도주 실시간 스캐너")
+st.title("🎯 AI 실시간 고안정성 주도주 스캐너")
 
-# 🔄 갱신 버튼을 상단 전면에 크게 배치 (충돌 가능성 0%)
-if st.button("🔄 실시간 시세 고속 동기화", type="primary", use_container_width=True):
-    asyncio.run(run_scanner())
-    st.rerun()
+if st.button("🔄 즉시 마켓 시세 스캔", type="primary", use_container_width=True):
+    with st.spinner("한투 오피셜 세션 가동 및 실시간 데이터 수합 중..."):
+        api = KoreaInvestmentOfficialAPI(APP_KEY, APP_SECRET)
+        token = api.get_fresh_access_token()
+        if token:
+            tickers = api.get_market_leading_tickers(token)
+            for idx, (t, n) in enumerate(tickers[:20]):
+                time.sleep(0.1) # 초당 제한 분사
+                data = api.get_realtime_price(t, token, default_name=n)
+                if data:
+                    st.session_state.engine_cache[t] = data
+            st.rerun()
+        else:
+            st.error("❌ 한투 API 토큰 발급에 실패했습니다. Secrets 구문을 점검해 주세요.")
 
-# 데이터 수합 및 정렬용 데이터 프레임 빌드
+# 화면 출력 테이블 렌더링
 display_list = []
-for ticker, name in st.session_state.active_pool.items():
-    c = st.session_state.price_cache.get(ticker, {})
+for t, n in BACKUP_MASTER_POOL:
+    c = st.session_state.engine_cache.get(t, {})
     display_list.append({
-        "종목명": name,
-        "현재가": f"{int(c.get('price', 0)):,}원" if c.get('price') else "데이터 대기중",
-        "등락률": f"{c.get('ctrt', 0.0):+.2f}%",
-        "거래량": f"{int(c.get('vol', 0)):,}주",
-        "최근시각": c.get('time', '-')
+        "종목코드": t, "종목명": c.get("name", n),
+        "현재가": f"{int(c['Close']):,}원" if c.get("Close") else "대기중",
+        "등락률": f"{c.get('PrdyCtrt', 0.0):+.2f}%" if c.get("PrdyCtrt") else "0.00%",
+        "거래량": f"{int(c['Volume']):,}주" if c.get("Volume") else "-",
+        "유의종목여부": "⚠️ 투자유의" if c.get("is_restricted") else "🟢 정상",
+        "동기화시각": c.get("time", "-")
     })
 
-if display_list:
-    df_display = pd.DataFrame(display_list)
-    df_display["sort_val"] = df_display["등락률"].str.replace("%", "").astype(float)
-    df_display = df_display.sort_values(by="sort_val", ascending=False).reset_index(drop=True)
-    df_display = df_display.drop(columns=["sort_val"])
-    
-    df_display.insert(0, "순위", [f"{i+1}위" for i in range(len(df_display))])
-    
-    # 상단 갱신 버튼 바로 밑에 대시보드 상태를 안정적으로 노출
-    st.markdown(f"📊 **현재 상위 수급포착:** 10,000원 이상 {len(df_display)}개 종목 실시간 감시 중")
-    st.markdown("---")
-    
-    # 데이터 표 시원하게 출력
-    st.dataframe(df_display, use_container_width=True, hide_index=True, height=750)
-else:
-    st.info("데이터가 비어있습니다. 위 갱신 버튼을 눌러주세요.")
+st.dataframe(pd.DataFrame(display_list), use_container_width=True, hide_index=True, height=650)
