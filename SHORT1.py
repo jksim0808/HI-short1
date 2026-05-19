@@ -12,7 +12,7 @@ APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
 # =================================================================
-# 🏦 한투 실전투자 전용 파싱 엔진 (10선 트래픽 최적화 모델)
+# 🏦 한투 실전투자 전용 파싱 엔진 (디버깅 내장형)
 # =================================================================
 class KoreaInvestmentOfficialAPI:
     def __init__(self):
@@ -41,11 +41,11 @@ class KoreaInvestmentOfficialAPI:
 
     def get_realtime_price(self, ticker, token):
         if not token:
-            return None
+            return None, "토큰 누락"
             
         url = f"{self.base_url}/uapi/domestic-stock/v1/quoting/inquire-price"
         
-        # 압축 10선 코스닥 종목 타겟팅 (에이직랜드, 파두, 한미반도체, 에코프로비엠)
+        # 압축 10선 코스닥/코스피 시장 분기
         kosdaq_tickers = ["422340", "043200", "042700", "247540"]
         market_div = "Y" if ticker in kosdaq_tickers else "J"
         
@@ -63,11 +63,13 @@ class KoreaInvestmentOfficialAPI:
             r = requests.get(url, headers=headers, params=params, timeout=5)
             if r.status_code == 200:
                 res_json = r.json()
+                
+                # 🎯 한투 서버가 돌려준 에러 메시지 원본 분석 프로토콜
+                rt_cd = res_json.get("rt_cd", "")
+                msg1 = res_json.get("msg1", "").strip()
+                
                 out1 = res_json.get("output1")
                 
-                if not out1:
-                    return None
-                    
                 if isinstance(out1, list) and len(out1) > 0:
                     out1 = out1[0]
                 
@@ -79,32 +81,37 @@ class KoreaInvestmentOfficialAPI:
                     close_val = _clean(out1.get("stck_prpr"))
                     
                     if close_val > 0:
-                        return {
+                        data_dict = {
                             "Close": close_val,
                             "High": _clean(out1.get("stck_hgpr")),
                             "Low": _clean(out1.get("stck_lwpr")),
                             "Volume": _clean(out1.get("accl_tr_vol")),
                             "PrdyCtrt": float(str(out1.get("prdy_ctrt", "0.0")).strip())
                         }
-        except:
-            pass
-        return None
+                        return data_dict, f"성공 (상태코드: {rt_cd})"
+                
+                # 실패했을 경우 한투가 뱉은 원본 메시지 반환
+                return None, f"서버거부 -> [코드: {rt_cd}] {msg1}"
+            else:
+                return None, f"HTTP 에러 (통신상태: {r.status_code})"
+        except Exception as e:
+            return None, f"시스템 예외 오류: {str(e)}"
 
 # =================================================================
-# 🧠 AI 주도주 정예 압축 10선 (반도체/NPU/로보틱스/미래모빌리티 핵심주)
+# 🧠 AI 주도주 정예 압축 10선
 # =================================================================
 def get_ai_lead_stocks():
     return {
-        "005930": "삼성전자",       # 레거시 반도체 및 파운드리 축
-        "000660": "SK하이닉스",     # HBM 주도권 대형주
-        "422340": "에이직랜드",     # AI 반도체 디자인하우스 핵심 (NPU 연동)
-        "043200": "파두",          # 차세대 SSD 컨트롤러 및 AI 데이터센터 수혜
-        "042700": "한미반도체",     # HBM 필수 공정 TC 본더 독점주
-        "005380": "현대차",         # PBV 및 미래형 미래 모빌리티 대장주
-        "000270": "기아",           # PBV(PV5) 플랫폼 다변화 주도주
-        "247540": "에코프로비엠",   # 2차전지/소재 대표 수급주
-        "373220": "LG에너지솔루션", # 배터리/스마트팩토리 인프라
-        "068270": "셀트리온"        # 바이오/대형 수급 분산 방어주
+        "005930": "삼성전자",       
+        "000660": "SK하이닉스",     
+        "422340": "에이직랜드",     
+        "043200": "파두",          
+        "042700": "한미반도체",     
+        "005380": "현대차",         
+        "000270": "기아",           
+        "247540": "에코프로비엠",   
+        "373220": "LG에너지솔루션", 
+        "068270": "셀트리온"        
     }
 
 # =================================================================
@@ -112,8 +119,8 @@ def get_ai_lead_stocks():
 # =================================================================
 st.set_page_config(page_title="AI 주도주 실시간 단타 스캐너", layout="wide")
 
-st.title("🎯 AI 정예 주도주 10선 실시간 단타 스캐너 (⚡ 고속 압축판)")
-st.caption(f" 가동 시점: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 10대 정예 종목 고속 스캔 엔진")
+st.title("🎯 AI 정예 주도주 10선 실시간 단타 스캐너 (⚙️ 디버깅 디텍터 탑재)")
+st.caption(f" 가동 시점: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 100% 한투 원본 실전 데이터 동기화")
 
 if "market_history" not in st.session_state:
     st.session_state.market_history = {}
@@ -125,26 +132,34 @@ master_pool = get_ai_lead_stocks()
 
 col_btn1, col_btn2, col_info = st.columns([1, 1, 3])
 
-if col_btn1.button("⚡ AI 정예 10선 수급 동기화", type="primary", use_container_width=True, key="btn_sync_compressed"):
+if col_btn1.button("⚡ AI 정예 10선 수급 동기화", type="primary", use_container_width=True, key="btn_sync_final"):
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     with st.spinner("한투 보안 표준 인증 토큰 획득 중..."):
         master_token = api.get_fresh_access_token()
         
     if not master_token:
-        st.error("🚨 한투 서버가 인증 토큰 발급을 거부했습니다. Streamlit Secrets 설정을 재점검하십시오.")
+        st.error("🚨 [인증단계 거부] 한투 서버가 토큰 발급을 거절했습니다. Secrets의 Key를 재확인하십시오.")
     else:
+        st.success("🔑 1단계 통과: 한투 표준 인증 토큰 발급 완료 (카톡 알림 정합성 일치)")
+        
         temp_history = {}
         temp_pct = {}
         success_count = 0
         
+        # 대표님께 투명하게 보여드릴 한투 응답 실시간 로그판
+        st.markdown("### 🔍 한투 서버 실시간 응답 분석 헤드셋")
+        log_box = st.empty()
+        log_messages = []
+        
         progress_bar = st.progress(0)
-        status_text = st.empty()
         
         for idx, (ticker, name) in enumerate(master_pool.items()):
-            status_text.text(f"🔄 고속 패킷 수신 중: {name} ({ticker})")
+            # 시세 조회 요청 및 에러메시지 수령
+            data, server_msg = api.get_realtime_price(ticker, master_token)
             
-            data = api.get_realtime_price(ticker, master_token)
+            log_messages.append(f"• **{name} ({ticker})** -> {server_msg}")
+            log_box.markdown("\n".join(log_messages))
             
             if data and data["Close"] > 0:
                 success_count += 1
@@ -159,28 +174,26 @@ if col_btn1.button("⚡ AI 정예 10선 수급 동기화", type="primary", use_c
                 else:
                     temp_history[ticker] = pd.concat([st.session_state.market_history[ticker], new_row]).tail(20)
             
-            # 🎯 종목 축소로 딜레이를 0.35초로 최적화 단축하여 3초 만에 전체 스캔 완료
-            time.sleep(0.35)
+            time.sleep(0.35) # TPS 호출 제한선(초당 2건) 안전 우회
             progress_bar.progress((idx + 1) / len(master_pool))
             
         progress_bar.empty()
-        status_text.empty()
 
         if success_count > 0:
             st.session_state.market_history.update(temp_history)
             st.session_state.live_pct_map.update(temp_pct)
             st.session_state["data_loaded"] = True
-            st.success(f"🟢 동기화 완료! 정예 10선 중 {success_count}개 종목 원본 수신 성공.")
+            st.toast("정예 10선 수급 데이터 동기화 완수!", icon="🟢")
         else:
-            st.error("🚨 한투 서버가 패킷 반환을 거부했습니다. 장중 시간 여부 및 계좌 상태를 확인해 주십시오.")
+            st.error("🚨 [2단계 패킷 차단] 로그판을 확인해 주십시오. 한투가 반환한 상세 거부 사유가 위에 표시되어 있습니다.")
 
-if col_btn2.button("🧹 단타 캐시 리셋", use_container_width=True, key="btn_reset_compressed"):
+if col_btn2.button("🧹 단타 캐시 리셋", use_container_width=True, key="btn_reset_final"):
     st.session_state.market_history = {}
     st.session_state.live_pct_map = {}
     if "data_loaded" in st.session_state: del st.session_state["data_loaded"]
     st.rerun()
 
-col_info.markdown("💡 **운용 전략:** 종목이 10개로 정제되어 데이터 연산 부하가 절반으로 감소했습니다. 단타 타점 회전율이 대폭 상승합니다.")
+col_info.markdown("⚠️ **안내:** 가상값은 원천 배제되었습니다. 위 실시간 분석 패널에 찍히는 메시지를 통해 한투 계좌 상태를 즉시 추적할 수 있습니다.")
 
 st.markdown("---")
 
@@ -229,7 +242,6 @@ if st.session_state.get("data_loaded", False) and st.session_state.market_histor
         st.markdown("---")
         st.subheader("🎯 압축 10선 실시간 수급 보드")
         
-        # 10개 종목에 딱 맞게 2줄(구조 최적화) 배열 구성
         cols = st.columns(5)
         for idx, row in enumerate(ranking_df.itertuples()):
             target_col = cols[idx % 5]
@@ -241,4 +253,4 @@ if st.session_state.get("data_loaded", False) and st.session_state.market_histor
                 st.caption(f"⚡ 시그널: `{sig_text}`")
                 st.markdown("---")
 else:
-    st.info("⏳ 정예 10선 시스템 대기 중입니다. 상단의 동기화 버튼을 클릭해 주십시오.")
+    st.info("⏳ 시스템 가동 대기 중입니다. 상단의 동기화 버튼을 클릭해 주십시오.")
