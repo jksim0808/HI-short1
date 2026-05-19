@@ -20,7 +20,6 @@ BACKUP_MASTER_POOL = [
     ("015760", "한국전력"), ("004020", "현대제철"), ("011780", "금호석유"), ("010950", "S-Oil")
 ]
 
-# 🎯 [핵심 보안망] 토큰 유효기간 및 메모리 영구 보존용 세션 캐시 생성
 if "engine_cache" not in st.session_state: st.session_state.engine_cache = {}
 if "last_pool" not in st.session_state: st.session_state.last_pool = BACKUP_MASTER_POOL
 if "hantu_token" not in st.session_state: st.session_state.hantu_token = None
@@ -34,7 +33,6 @@ class HantuSyncEngine:
         self.session = requests.Session()
         
     def get_token(self):
-        # 🎯 [연타 방지 핵심] 메모리에 이미 살아있는 토큰이 있고 만료 시간이 남았다면 한투에 요청 안 하고 즉시 재사용!
         now = datetime.now(tz=timezone.utc)
         if st.session_state.hantu_token and st.session_state.token_expires_at and st.session_state.token_expires_at > now:
             return st.session_state.hantu_token
@@ -45,13 +43,10 @@ class HantuSyncEngine:
             if r.status_code == 200:
                 data = r.json()
                 token = data.get("access_token")
-                
-                # 한투 토큰은 기본 6시간 동안 유효하므로 안전하게 5시간 뒤 만료되도록 세팅
                 st.session_state.hantu_token = token
                 st.session_state.token_expires_at = datetime.now(tz=timezone.utc) + timedelta(hours=5)
                 return token
-        except: 
-            pass
+        except: pass
         return None
 
     def fetch_market_pool(self, token):
@@ -80,15 +75,13 @@ class HantuSyncEngine:
                         if any(k in name for k in ["우", "스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER"]): continue
                         pool.append((ticker, name))
                     
-                    if len(pool) >= 20: 
-                        break
+                    if len(pool) >= 20: break
                         
                 if len(pool) < 20:
                     for b_ticker, b_name in BACKUP_MASTER_POOL:
                         if len(pool) >= 20: break
                         if not any(b_ticker == p[0] for p in pool):
                             pool.append((b_ticker, b_name))
-                            
                 return pool
         except: pass
         return BACKUP_MASTER_POOL
@@ -127,19 +120,19 @@ class HantuSyncEngine:
         }
 
 # =====================================================================
-# 🖥 *UI 대시보드 및 동기 처리 제어 파트
+# 🖥️ UI 대시보드 및 동기 처리 제어 파트
 # =====================================================================
-st.title("🎯 AI 실시간 고안정성 주도주 스캐너 (10,000원↑)")
+st.title("🎯 AI 실시간 고안정성 주도주 스캐너 (단타 등급 엔진 결합)")
 
-if st.button("🔄 즉시 마켓 시세 스캔 및 갱신", type="primary", use_container_width=True):
+if st.button("🔄 즉시 마켓 시세 스캔 및 등락 분류", type="primary", use_container_width=True):
     if "token_error" in st.session_state: del st.session_state["token_error"]
     
-    with st.spinner("한투 보안 규격을 준수하여 20개 주도주 정밀 스캔 중..."):
+    with st.spinner("한투 보안 통신망 가동 및 단타 주도주 분류 중..."):
         engine = HantuSyncEngine()
         token = engine.get_token()
         
         if not token:
-            st.session_state["token_error"] = "토큰 발급 한도 초과 또는 키 오류 (잠시 후 다시 시도해 주세요)"
+            st.session_state["token_error"] = "토큰 발급 실패 (잠시 후 다시 시도해 주세요)"
         else:
             dynamic_pool = engine.fetch_market_pool(token)
             st.session_state.last_pool = dynamic_pool
@@ -148,21 +141,40 @@ if st.button("🔄 즉시 마켓 시세 스캔 및 갱신", type="primary", use_
                 res = engine.fetch_single_price(token, t, n)
                 st.session_state.engine_cache[t] = res
                 time.sleep(0.12)
-                
             st.rerun()
 
 if "token_error" in st.session_state:
     st.error(f"❌ {st.session_state['token_error']}")
 
-# 데이터 취합부 생성
+# 데이터 취합 및 실시간 등급 연산부
 display_list = []
 for t, n in st.session_state.last_pool[:20]:
     c = st.session_state.engine_cache.get(t, {})
     price_val = c.get("price", -1)
+    ctrt_val = c.get("ctrt", 0.0)
+    stat_val = c.get("stat", "00")
     
+    # 🎯 [핵심 알고리즘 구동] 지난번 정밀 단타 로직에 따른 동적 구분 시스템
+    is_restricted = stat_val in ["51", "52", "53", "54", "58", "59"]
+    
+    if price_val <= 0:
+        rank_grade = "⚙️ 대기중"
+    elif is_restricted:
+        rank_grade = "❌ 매매제외 (위험주)"
+    elif ctrt_val <= 0.0:
+        rank_grade = "❌ 매매제외 (역배열 낙주)"
+    elif ctrt_val >= 25.0:
+        rank_grade = "⚡ B급 (과열/추격금지)"
+    elif ctrt_val >= 10.0 and ctrt_val < 25.0:
+        rank_grade = "🔥 A급 (최우선 대장주)"
+    elif ctrt_val >= 5.0 and ctrt_val < 10.0:
+        rank_grade = "⚡ B급 (후발/방망이짧게)"
+    else:
+        rank_grade = "📋 일반 관망"
+
     if price_val > 0:
         current_price_str = f"{int(price_val):,}원"
-        ctrt_str = f"{c.get('ctrt', 0.0):+.2f}%"
+        ctrt_str = f"{ctrt_val:+.2f}%"
         vol_str = f"{int(c['volume']):,}주"
         time_str = c.get("time", "-")
     else:
@@ -174,10 +186,11 @@ for t, n in st.session_state.last_pool[:20]:
     display_list.append({
         "종목코드": t,
         "종목명": c.get("name", n),
+        "매매등급": rank_grade, # 🎯 실시간 정밀 분류 칼럼 주입
         "현재가": current_price_str,
         "등락률": ctrt_str,
         "거래량": vol_str,
-        "상태": "⚠️ 유의종목" if c.get("stat") in ["51", "52", "53", "54", "58", "59"] else "🟢 정상",
+        "상태": "⚠️ 유의종목" if is_restricted else "🟢 정상",
         "갱신시각": time_str
     })
 
