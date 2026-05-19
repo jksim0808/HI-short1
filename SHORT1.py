@@ -14,29 +14,29 @@ APP_KEY = st.secrets.get("HANTU_APP_KEY", "YOUR_APP_KEY")
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "YOUR_APP_SECRET")
 
 # =================================================================
-# 🏦 한국투자증권 실전 API 전용 강력 통신 엔진 (야후 완전 제거)
+# 🏦 한국투자증권 실전 API 전용 강력 통신 엔진 (토큰 세션 고정형)
 # =================================================================
 class KoreaInvestmentAPI:
     def __init__(self):
-        # 💡 한투 실전투자 공식 도메인 고정
         self.base_url = "https://openapi.koreainvestment.com:9443"
         self.app_key = APP_KEY
         self.app_secret = APP_SECRET
         
-        # ⚡ [핵심 강력 조치] 한투 방화벽 우회를 위한 세션 및 재시도 메커니즘 구축
         self.session = requests.Session()
         retry_strategy = Retry(
-            total=3,                          # 연결 실패 시 총 3번 재시도
-            backoff_factor=0.2,               # 재시도 간격 (0.2초, 0.4초...)
-            status_forcelist=[500, 502, 503, 504] # 해당 서버 에러 발생 시 재시도
+            total=3,
+            backoff_factor=0.2,
+            status_forcelist=[500, 502, 503, 504]
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         self.session.mount("https://", adapter)
 
     def get_access_token(self):
-        """ 실전 토큰 세션 캐싱 및 검증 모듈 """
+        """ [완벽 튜닝] 발급받은 토큰을 지우지 않고 만료 전까지 철저히 뼈를 발라 재사용 """
+        # 1. 이미 발급받은 토큰과 만료 시간이 메모리에 남아있다면 즉시 그것을 반환 (한투 요청 차단)
         if "api_access_token" in st.session_state and st.session_state.api_access_token:
-            return st.session_state.api_access_token
+            if "token_expire_time" in st.session_state and datetime.now() < st.session_state.token_expire_time:
+                return st.session_state.api_access_token
         
         try:
             url = f"{self.base_url}/oauth2/tokenP"
@@ -48,31 +48,35 @@ class KoreaInvestmentAPI:
             
             response = self.session.post(url, headers=headers, json=data, timeout=5.0)
             if response.status_code == 200:
-                token = response.json().get("access_token")
+                res_json = response.json()
+                token = res_json.get("access_token")
+                
+                # 💡 한투 토큰은 유효기간이 24시간입니다. 넉넉하게 12시간 동안은 절대로 한투에 재요청 안 하도록 잠금.
                 st.session_state.api_access_token = token
+                st.session_state.token_expire_time = datetime.now() + timedelta(hours=12)
                 return token
             else:
-                st.error(f"❌ [토큰 발급 실패] 한투 응답: {response.text}")
+                # 1분 제한 걸렸을 때 화면에 빨간 에러 다발로 도배되는 것을 방지하기 위해 묵묵히 기존 캐시 토큰 사용 시도
+                if "api_access_token" in st.session_state:
+                    return st.session_state.api_access_token
                 return None
         except Exception as e:
-            st.error(f"💥 [토큰 통신 장애]: {str(e)}")
+            if "api_access_token" in st.session_state:
+                return st.session_state.api_access_token
             return None
 
     def get_realtime_price(self, ticker):
-        """ 야후 백업 전면 제거 ➡️ 100% 한투 데이터 정밀 파싱 구문 """
         access_token = self.get_access_token()
         if not access_token:
             return None
             
         url = f"{self.base_url}/uapi/domestic-stock/v1/quoting/inquire-price"
-        
-        # 💡 일반 PC 브라우저로 위장하여 한투 보안망 패스 유도
         headers = {
             "content-type": "application/json; charset=utf-8",
             "authorization": f"Bearer {access_token}",
             "appkey": self.app_key,
             "appsecret": self.app_secret,
-            "tr_id": "FHKST01010200", # 실전투자 주식현재가 호가 TR ID
+            "tr_id": "FHKST01010200", 
             "custtype": "P",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
@@ -82,16 +86,17 @@ class KoreaInvestmentAPI:
         }
         
         try:
-            # 타임아웃을 5초로 늘려 한투 서버 접속 안전성 보장
             response = self.session.get(url, headers=headers, params=params, timeout=5.0)
 
             if response.status_code == 200:
                 res_json = response.json()
                 rt_cd = res_json.get("rt_cd", "0")
-                msg1 = res_json.get("msg1", "").strip()
                 
+                # 토큰 만료 에러나 재인증이 필요하다는 메시지가 수신되면 그때만 토큰 비우기
                 if rt_cd != "0":
-                    st.error(f"⚠️ [한투 데이터 거절 - {ticker}] {msg1}")
+                    msg_cd = res_json.get("msg_cd", "")
+                    if msg_cd in ["EGW00001", "EGW00002", "ISC00002"]: # 토큰 무효 관련 코드들
+                        st.session_state.api_access_token = None
                     return None
 
                 res_data = res_json.get("output", {})
@@ -106,13 +111,10 @@ class KoreaInvestmentAPI:
                         "High": high_price,
                         "Low": low_price,
                         "Volume": volume if volume > 0 else 1000.0,
-                        "Source": "한투 실전 호가 전용"
+                        "Source": "한투 실전 호가 고정"
                     }
-            else:
-                st.error(f"❌ [한투 통신 오류] 상태코드: {response.status_code}")
             return None
         except Exception as e:
-            st.error(f"💥 [한투 직통 라인 타임아웃/연결 장애]: {str(e)}")
             return None
 
 # =================================================================
@@ -211,20 +213,18 @@ st.caption(f"⏱️ 한투 실전 서버 데이터 연동 중... ({datetime.now(
 api = KoreaInvestmentAPI()
 current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
+# 💡 이제 이 버튼은 토큰을 강제로 지우지 않고 순수 데이터 버퍼만 초기화합니다. (1분 제한 차단용)
 if st.button("🔑 버퍼 및 캐시 비우기 (오류 초기화)", use_container_width=True):
     st.session_state.multi_market_data = {}
-    st.session_state.api_access_token = None
     st.rerun()
 
 summary_rows = []
 
 for ticker in st.session_state.custom_stock_pool:
-    # 💡 한투에서 시세를 가져옴
     live_tick = api.get_realtime_price(ticker)
     
-    # 만약 한투 통신 실패 시 화면 꼬임 방지를 위한 안전 예외처리
     if not live_tick:
-        live_tick = {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0, "Source": "⚠️ 한투 수신 대기중"}
+        live_tick = {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0, "Source": "⚠️ 한투 제한 대기중"}
 
     if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
         init_rows = []
@@ -289,6 +289,6 @@ if summary_rows:
             with st.container():
                 st.success(f"🍏 **{sig}**\n\n{card_header}"); st.markdown(card_body); st.markdown("---")
 
-# 리프레시 간격을 2.5초로 조정하여 트래픽 과부하 방지
-time.sleep(2.5)
+# 한투 초당 호출 제한(TPS) 안전 구역 확보를 위해 리프레시를 3초로 상향
+time.sleep(3.0)
 st.rerun()
