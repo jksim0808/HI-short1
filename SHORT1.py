@@ -65,9 +65,9 @@ class KoreaInvestmentOfficialAPI:
                 return dynamic_pool
         except:
             pass
-        return {"005930": "삼성전자", "000660": "SK하이닉스", "042700": "한미반도체", "440110": "파두"}
+        return {"005930": "삼성전자", "000660": "SK하이닉스", "042700": "한미반도체"}
 
-    # 🔥 [대수술] 어떤 패킷이 들어와도 정밀 타격하는 현재가 파싱 로직
+    # 현재가 파싱 엔진 (오차 정밀 수정)
     def get_realtime_price(self, ticker, token):
         if not token: return None, "토큰 누락"
         url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
@@ -87,28 +87,21 @@ class KoreaInvestmentOfficialAPI:
                 res_json = r.json()
                 out = res_json.get("output")
                 
-                # 🛡️ 리스트 구조로 래핑되어 들어오는 경우 첫 번째 원소 강제 파싱
-                if isinstance(out, list) and len(out) > 0:
-                    out = out[0]
+                if isinstance(out, list) and len(out) > 0: out = out[0]
                 elif not out or not isinstance(out, dict):
-                    # 백업 필드(output1)까지 2중 추적
                     out = res_json.get("output1", {})
                     if isinstance(out, list) and len(out) > 0: out = out[0]
                 
                 if isinstance(out, dict):
-                    # 문자열 공백, 기호(+, -) 완벽 제거 후 float 변환 유틸 함수
                     def _clean(val):
                         if val is None or str(val).strip() == "": return 0.0
                         return float(str(val).strip().replace("-", "").replace("+", ""))
                     
-                    # 한투 주종목 현재가 키값 매핑 (stck_prpr 또는 prpr)
                     close_val = _clean(out.get("stck_prpr"))
                     if close_val == 0: close_val = _clean(out.get("prpr"))
                     
                     if close_val > 0:
-                        # 등락률 파싱 (부호 유지해야 하므로 replace 없이 부동소수점화)
                         raw_ctrt = out.get("prdy_ctrt") if out.get("prdy_ctrt") else out.get("ctrt", "0.0")
-                        
                         data_dict = {
                             "Close": close_val,
                             "High": _clean(out.get("stck_hgpr") if out.get("stck_hgpr") else out.get("hgpr", 0)),
@@ -183,8 +176,8 @@ def run_dynamic_market_scan(api):
 # =================================================================
 st.set_page_config(page_title="실시간 거래대금 수급 스캐너 20", layout="wide")
 
-st.title("🎯 AI 시장 거래대금 상위 주도주 20선 동적 실시간 스캐너")
-st.caption(f"가동 시점: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 현재가 왜곡 보정 및 실시간 엔진 완결판")
+st.title("🎯 AI 장중 거래대금 상위 20선 실시간 동적 스캐너")
+st.caption(f"가동 시점: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 데이터 초동 진입 시그널 보정 완료 버전")
 
 if "market_history" not in st.session_state: st.session_state.market_history = {}
 if "live_pct_map" not in st.session_state: st.session_state.live_pct_map = {}
@@ -193,13 +186,13 @@ if "active_pool" not in st.session_state: st.session_state.active_pool = {}
 api = KoreaInvestmentOfficialAPI()
 col_btn1, col_btn2, col_info = st.columns([1.5, 1.5, 4])
 
-# 1. 수급 업데이트 버튼
-if col_btn1.button("⚡ 현재 종목 수급 동기화", type="primary", use_container_width=True):
+# 1. 수급 업데이트 (과거 내역 유지하며 현재가 누적 연산)
+if col_btn1.button("⚡ 현재 종목 수급 동기화 (누적 이평선 구축)", type="primary", use_container_width=True):
     if not st.session_state.active_pool:
         run_dynamic_market_scan(api)
     else:
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with st.spinner("현재가 리프레시 중..."):
+        with st.spinner("현재가 리프레시 및 단기 누적 연산 중..."):
             master_token = api.get_fresh_access_token()
             if master_token:
                 for ticker in st.session_state.active_pool.keys():
@@ -237,7 +230,8 @@ if st.session_state.get("data_loaded", False) and st.session_state.market_histor
         
         ranking_list.append({
             "code": str(ticker), "name": str(current_pool.get(ticker, "알수없음")), "price": int(latest["Close"]),
-            "vwap": int(vwap_val), "growth": growth_rate, "gap": float(latest["Close"] - vwap_val)
+            "vwap": int(vwap_val), "growth": growth_rate, "gap": float(latest["Close"] - vwap_val),
+            "data_count": len(df) # 데이터가 누적된 개수 추적
         })
     
     ranking_df = pd.DataFrame(ranking_list)
@@ -259,19 +253,24 @@ if st.session_state.get("data_loaded", False) and st.session_state.market_histor
         
         display_rows = []
         for rank, row in enumerate(ranking_df.itertuples(), 1):
-            if row.growth > 4.0 and row.gap > 0:
-                signal = "⚡ 초강력 돌파 (매수)"
+            # 🔥 [시그널 로직 고도화] 초동 진입(data_count==1)이더라도 등락률이 폭발하면 무조건 매수 돌파 시그널 출력
+            if row.growth >= 10.0:
+                signal = "🔥 상한가 도전 / 초급등 수급 (매수)"
+            elif row.growth > 4.0:
+                signal = "⚡ 거래량 폭발 돌파 (매수)"
             elif row.growth > 0.5:
-                signal = "🟢 수급 추종 (보유)"
-            elif row.growth < -2.0:
-                signal = "🚨 단기 청산 (대피)"
+                signal = "🟢 수급 우상향 추종 (보유)"
+            elif row.growth < -3.0:
+                signal = "🚨 단기 폭락 탈출 (대대피)"
             else:
                 signal = "⚪ 숨고르기 (관망)"
                 
             display_rows.append({
                 "순위": f"{rank}위", "종목코드": row.code, "종목명": row.name, "현재가": f"{row.price:,} 원",
-                "단기 이평선": f"{row.vwap:,} 원", "당일 등락률": f"{row.growth:+.2f}%",
-                "이평선 격차": f"{int(row.gap):+,}원", "실시간 단타 시그널": signal
+                "단기 이평선": f"{row.vwap:,} 원" if row.data_count > 1 else "계산중 (다음 동기화시 노출)", 
+                "당일 등락률": f"{row.growth:+.2f}%",
+                "이평선 격차": f"{int(row.gap):+,}원" if row.data_count > 1 else "0 원 (초동)", 
+                "실시간 단타 시그널": signal
             })
         
         st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
@@ -284,12 +283,18 @@ if st.session_state.get("data_loaded", False) and st.session_state.market_histor
             target_col = cols[idx % 4]
             with target_col:
                 st.markdown(f"#### {row.name} `({row.code})`")
-                st.metric(label=f"등락률: {row.growth:+.2f}%", value=f"{row.price:,}원", delta=f"이평차: {int(row.gap):+}원")
+                st.metric(
+                    label=f"등락률: {row.growth:+.2f}%", 
+                    value=f"{row.price:,}원", 
+                    delta=f"이평차: {int(row.gap):+}원" if row.data_count > 1 else "초동 연산"
+                )
                 
-                if row.growth > 4.0:
+                if row.growth > 10.0:
+                    st.error("🔥 폭발적 오버슈팅")
+                elif row.growth > 4.0:
                     st.error("⚡ 대량 거래 유입")
                 elif row.growth < -2.0:
-                    st.info("🚨 과매도 반등 대기")
+                    st.info("🚨 과매도 낙폭 과대")
                 else:
                     st.success("⚖️ 균형 수급 유지")
                 st.markdown("---")
