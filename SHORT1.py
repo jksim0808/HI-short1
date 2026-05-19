@@ -12,10 +12,11 @@ st.set_page_config(page_title="주도주 스캐너 Pro", layout="wide")
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
+# 🎯 [코드 보정] 존재하지 않는 코스모로보틱스 코드를 제거하고, 확실한 우량 주도주인 현대모비스(012330)로 대체했습니다.
 BACKUP_MASTER_POOL = [
     ("005930", "삼성전자"), ("000660", "SK하이닉스"), ("005380", "현대차"), ("000270", "기아"),
     ("068270", "셀트리온"), ("035420", "NAVER"), ("005490", "POSCO홀딩스"), ("051910", "LG화학"),
-    ("006400", "삼성SDI"), ("035720", "카카오"), ("439960", "코스모로보틱스"), ("000670", "영풍"),
+    ("006400", "삼성SDI"), ("035720", "카카오"), ("012330", "현대모비스"), ("000670", "영풍"),
     ("012450", "한화에어로스페이스"), ("009830", "한화솔루션"), ("034020", "두산에너빌리티"), ("010140", "삼성중공업"),
     ("015760", "한국전력"), ("004020", "현대제철"), ("011780", "금호석유"), ("010950", "S-Oil")
 ]
@@ -74,24 +75,28 @@ async def fetch_single_price_async(client, token, ticker, name, delay):
         if r.status_code == 200:
             res_json = r.json()
             out = res_json.get("output") if res_json.get("output") else res_json.get("output1")
-            if out:
-                return {
-                    "ticker": ticker, "name": name,
-                    "price": float(out.get("stck_prpr", 0)),
-                    "ctrt": float(out.get("prdy_ctrt", 0.0)),
-                    "volume": float(out.get("acml_vol", out.get("accl_tr_vol", 0))),
-                    "stat": str(out.get("iscd_stat_cls_code", "00")).strip(),
-                    "time": datetime.now().strftime("%H:%M:%S")
-                }
+            
+            # 🎯 한투 서버가 rt_cd != 0 (종목코드 오류 등)을 반환할 때의 방어 밸브
+            if res_json.get("rt_cd") != "0" or not out:
+                return {"ticker": ticker, "name": name, "price": -1, "ctrt": 0.0, "volume": 0, "stat": "00", "time": "❌ 코드오류"}
+
+            return {
+                "ticker": ticker, "name": name,
+                "price": float(out.get("stck_prpr", 0)),
+                "ctrt": float(out.get("prdy_ctrt", 0.0)),
+                "volume": float(out.get("acml_vol", out.get("accl_tr_vol", 0))),
+                "stat": str(out.get("iscd_stat_cls_code", "00")).strip(),
+                "time": datetime.now().strftime("%H:%M:%S")
+            }
     except: pass
-    return {"ticker": ticker, "name": name, "price": -1, "ctrt": 0.0, "volume": 0, "stat": "00", "time": "❌ 통신 누락"}
+    return {"ticker": ticker, "name": name, "price": -1, "ctrt": 0.0, "volume": 0, "stat": "00", "time": "❌ 통신누락"}
 
 async def run_async_pipeline():
     limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
     async with httpx.AsyncClient(limits=limits) as client:
         token = await fetch_token_async(client)
         if not token:
-            st.session_state["token_error"] = "토큰 발급 실패 (키 오염 또는 계정 권한 점검 요망)"
+            st.session_state["token_error"] = "토큰 발급 실패 (비밀키 권한 재점검 요망)"
             return
             
         dynamic_pool = await fetch_market_pool_async(client, token)
@@ -112,10 +117,9 @@ st.title("🎯 AI 실시간 고안정성 주도주 스캐너 (10,000원↑)")
 
 if st.button("🔄 즉시 마켓 시세 스캔 및 갱신", type="primary", use_container_width=True):
     if "token_error" in st.session_state: del st.session_state["token_error"]
-    with st.spinner("한투 오피셜 커넥터 가동 중..."):
+    with st.spinner("한투 오피셜 데이터 고속 수합 중..."):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        # 🎯 [오타 수정 완료] 명칭을 run_async_pipeline으로 정확히 일치시켰습니다.
         loop.run_until_complete(run_async_pipeline())
         loop.close()
     st.rerun()
@@ -130,7 +134,7 @@ for t, n in st.session_state.last_pool[:20]:
     price_val = c.get("price", 0)
     
     if price_val == -1:
-        current_price_str = "❌ 통신 오류"
+        current_price_str = c.get("time", "❌ 에러")
     elif price_val > 0:
         current_price_str = f"{int(price_val):,}원"
     else:
