@@ -46,7 +46,6 @@ async def fetch_pool(client, token):
         for item in output:
             price = float(item.get("stck_prpr", 0))
             name = item.get("hts_kor_isnm", "")
-            # 10,000원 미만 필터링 및 제외 대상 필터링
             if price >= 10000 and not any(k in name for k in ["우", "스팩", "리츠", "인버스", "KODEX", "TIGER"]):
                 pool[str(item.get("mksc_shrn_iscd", ""))] = name
             if len(pool) >= 20: break
@@ -75,18 +74,14 @@ async def run_scanner():
             if res: st.session_state.price_cache[res["ticker"]] = res
 
 # =================================================================
-# 🖥️ 화면 출력부 (컨테이너 안전망 전면 결합)
+# 🖥️ 화면 출력부 (에러 유발 요스 st.columns 완전 배제)
 # =================================================================
 st.title("🎯 10,000원 이상 우량 주도주 실시간 스캐너")
 
-# 🛡️ 에러가 발생하던 상단 제어부 레이아웃을 하나의 컨테이너 박스로 격리
-with st.container():
-    col_ctrl, col_info = st.columns(2)
-    
-    with col_ctrl:
-        if st.button("🔄 실시간 시세 갱신", type="primary", use_container_width=True):
-            asyncio.run(run_scanner())
-            st.rerun()
+# 🔄 갱신 버튼을 상단 전면에 크게 배치 (충돌 가능성 0%)
+if st.button("🔄 실시간 시세 고속 동기화", type="primary", use_container_width=True):
+    asyncio.run(run_scanner())
+    st.rerun()
 
 # 데이터 수합 및 정렬용 데이터 프레임 빌드
 display_list = []
@@ -102,19 +97,17 @@ for ticker, name in st.session_state.active_pool.items():
 
 if display_list:
     df_display = pd.DataFrame(display_list)
-    # 등락률 기준으로 정렬 가공
     df_display["sort_val"] = df_display["등락률"].str.replace("%", "").astype(float)
     df_display = df_display.sort_values(by="sort_val", ascending=False).reset_index(drop=True)
     df_display = df_display.drop(columns=["sort_val"])
     
-    # 가독성을 위한 순위 칼럼 수동 주입
     df_display.insert(0, "순위", [f"{i+1}위" for i in range(len(df_display))])
     
-    # 정보 텍스트 역시 컨테이너 안전망 내부 매핑
-    with col_info:
-        st.markdown(f"##### 📊 현재 수급 포착: **{len(df_display)}개 종목** 모니터링 중")
+    # 상단 갱신 버튼 바로 밑에 대시보드 상태를 안정적으로 노출
+    st.markdown(f"📊 **현재 상위 수급포착:** 10,000원 이상 {len(df_display)}개 종목 실시간 감시 중")
+    st.markdown("---")
     
-    # 높이 고정 및 가로 너비 확장 유지
+    # 데이터 표 시원하게 출력
     st.dataframe(df_display, use_container_width=True, hide_index=True, height=750)
 else:
     st.info("데이터가 비어있습니다. 위 갱신 버튼을 눌러주세요.")
