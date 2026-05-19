@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 # =====================================================================
 # ⚙️ [최우선] Streamlit 설정 및 세션 초기화
@@ -20,22 +20,39 @@ BACKUP_MASTER_POOL = [
     ("015760", "한국전력"), ("004020", "현대제철"), ("011780", "금호석유"), ("010950", "S-Oil")
 ]
 
+# 🎯 [핵심 보안망] 토큰 유효기간 및 메모리 영구 보존용 세션 캐시 생성
 if "engine_cache" not in st.session_state: st.session_state.engine_cache = {}
 if "last_pool" not in st.session_state: st.session_state.last_pool = BACKUP_MASTER_POOL
+if "hantu_token" not in st.session_state: st.session_state.hantu_token = None
+if "token_expires_at" not in st.session_state: st.session_state.token_expires_at = None
 
 # =====================================================================
-# 🏹 무결점 동기식 한투 API 커넥터 엔진 (20개 타이트매칭 보정)
+# 🏹 무결점 동기식 한투 API 커넥터 엔진
 # =====================================================================
 class HantuSyncEngine:
     def __init__(self):
         self.session = requests.Session()
         
     def get_token(self):
+        # 🎯 [연타 방지 핵심] 메모리에 이미 살아있는 토큰이 있고 만료 시간이 남았다면 한투에 요청 안 하고 즉시 재사용!
+        now = datetime.now(tz=timezone.utc)
+        if st.session_state.hantu_token and st.session_state.token_expires_at and st.session_state.token_expires_at > now:
+            return st.session_state.hantu_token
+
         url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
         try:
             r = self.session.post(url, json={"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}, timeout=3.0)
-            return r.json().get("access_token")
-        except: return None
+            if r.status_code == 200:
+                data = r.json()
+                token = data.get("access_token")
+                
+                # 한투 토큰은 기본 6시간 동안 유효하므로 안전하게 5시간 뒤 만료되도록 세팅
+                st.session_state.hantu_token = token
+                st.session_state.token_expires_at = datetime.now(tz=timezone.utc) + timedelta(hours=5)
+                return token
+        except: 
+            pass
+        return None
 
     def fetch_market_pool(self, token):
         url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
@@ -53,23 +70,19 @@ class HantuSyncEngine:
                 output = r.json().get("output", [])
                 pool = []
                 
-                # 🎯 [핵심 보정] 저가주 탈락을 대비해 상위 수십 개 데이터를 끝까지 탐색하며 만 원 이상 종목 20개를 완벽히 채웁니다.
                 for item in output:
                     ticker = str(item.get("mksc_shrn_iscd", "")).strip()[-6:]
                     name = str(item.get("hts_kor_isnm", item.get("data_name", ""))).strip()
                     try: price = float(item.get("stck_prpr", 0))
                     except: price = 0
                     
-                    # 10,000원 이상 우량주 검증 필터
                     if ticker.isdigit() and name and name != "None" and price >= 10000:
                         if any(k in name for k in ["우", "스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER"]): continue
                         pool.append((ticker, name))
                     
-                    # 정확히 20개가 채워지면 탐색을 즉시 종료
                     if len(pool) >= 20: 
                         break
                         
-                # 만약 장중 필터 통과 종목이 20개 미만일 경우 백업 마스터 종목으로 부족한 자리를 채워 20개 라인을 강제 수호합니다.
                 if len(pool) < 20:
                     for b_ticker, b_name in BACKUP_MASTER_POOL:
                         if len(pool) >= 20: break
@@ -114,7 +127,7 @@ class HantuSyncEngine:
         }
 
 # =====================================================================
-# 🖥️ UI 대시보드 및 동기 처리 제어 파트
+# 🖥 *UI 대시보드 및 동기 처리 제어 파트
 # =====================================================================
 st.title("🎯 AI 실시간 고안정성 주도주 스캐너 (10,000원↑)")
 
@@ -126,13 +139,11 @@ if st.button("🔄 즉시 마켓 시세 스캔 및 갱신", type="primary", use_
         token = engine.get_token()
         
         if not token:
-            st.session_state["token_error"] = "토큰 발급 실패 (비밀키 권한 재점검 요망)"
+            st.session_state["token_error"] = "토큰 발급 한도 초과 또는 키 오류 (잠시 후 다시 시도해 주세요)"
         else:
-            # 1. 수급 주도주 완벽히 20개 확보
             dynamic_pool = engine.fetch_market_pool(token)
             st.session_state.last_pool = dynamic_pool
             
-            # 2. 20개 종목 순차 분사 조회
             for idx, (t, n) in enumerate(dynamic_pool[:20]):
                 res = engine.fetch_single_price(token, t, n)
                 st.session_state.engine_cache[t] = res
@@ -141,7 +152,7 @@ if st.button("🔄 즉시 마켓 시세 스캔 및 갱신", type="primary", use_
             st.rerun()
 
 if "token_error" in st.session_state:
-    st.error(f"❌ 가동 실패: {st.session_state['token_error']}")
+    st.error(f"❌ {st.session_state['token_error']}")
 
 # 데이터 취합부 생성
 display_list = []
@@ -170,7 +181,6 @@ for t, n in st.session_state.last_pool[:20]:
         "갱신시각": time_str
     })
 
-# 가독성을 높이기 위해 수동 순위 배정 및 데이터프레임 노출
 df_final = pd.DataFrame(display_list)
 if not df_final.empty:
     df_final.insert(0, "순위", [f"{i+1}위" for i in range(len(df_final))])
