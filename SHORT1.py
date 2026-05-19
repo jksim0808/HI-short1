@@ -17,7 +17,7 @@ APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
 # =================================================================
-# 🏦 한투 실전투자 전용 정밀 통신 엔진 (output1 구조 대응 패치)
+# 🏦 한투 실전투자 전용 정밀 통신 엔진 (output2 시세 교차 매핑 패치)
 # =================================================================
 class KoreaInvestmentOfficialAPI:
     def __init__(self):
@@ -89,27 +89,37 @@ class KoreaInvestmentOfficialAPI:
             res_json = r.json()
             
             # -------------------------------------------------------------
-            # 🎯 [수정 핵심] 실전망 멀티 패킷(output1) 타격 장치
+            # 🎯 [수정 핵심] 대포 포커싱을 output2(시세/체결 패킷)로 전면 전환
             # -------------------------------------------------------------
-            # 한투 실전 응답에 output1이 우선 존재하므로, 이를 최우선 타깃으로 지정합니다.
-            out = res_json.get("output1") or res_json.get("output")
+            # 현재 호가 데이터가 output1에 들어오는 것이 확인되었으므로, 체결 데이터인 output2를 최우선 타깃으로 잡습니다.
+            out = res_json.get("output2") or res_json.get("output1") or res_json.get("output")
             
             if isinstance(out, list) and len(out) > 0:
                 out = out[0]
                 
             if not out or not isinstance(out, dict):
-                # 최악의 경우 output2나 루트 레벨 백업 수색
-                out = res_json.get("output2") or res_json if isinstance(res_json, dict) else {}
+                out = res_json if isinstance(res_json, dict) else {}
                 
-            # 시세 필드 매핑 데이터 교차 추출
+            # 시세 필드 매핑 데이터 추출 (stck_prpr, stck_hgpr, stck_lwpr, accl_tr_vol 추출 자동 스위칭)
             close_val = out.get("stck_prpr") or out.get("stck_prc") or out.get("prpr")
             high_val = out.get("stck_hgpr") or out.get("hgpr") or close_val
             low_val = out.get("stck_lwpr") or out.get("lwpr") or close_val
             vol_val = out.get("accl_tr_vol") or out.get("tr_vol") or out.get("volume")
 
-            # 데이터가 유실되었을 경우 최종 방어선
+            # 만약 복합 수색으로도 못 잡았을 경우, 딕셔너리 내부 전체 탐색 (방어선)
             if not close_val:
-                st.warning(f"⚠️ [구조 변경 타깃 오류] output1 내부 필드가 매핑되지 않았습니다.\n\n내부 필드샘플: `{list(out.keys())[:5]}`")
+                # 최악의 경우 output1과 output2를 뒤집어서 재수색
+                alt_out = res_json.get("output1") if "output2" in res_json else res_json.get("output2")
+                if isinstance(alt_out, list) and len(alt_out) > 0: alt_out = alt_out[0]
+                if isinstance(alt_out, dict):
+                    close_val = alt_out.get("stck_prpr") or alt_out.get("stck_prc")
+                    high_val = alt_out.get("stck_hgpr") or close_val
+                    low_val = alt_out.get("stck_lwpr") or close_val
+                    vol_val = alt_out.get("accl_tr_vol")
+
+            # 최종 데이터 유실 보호벽
+            if not close_val:
+                st.warning(f"⚠️ [필드 구조 최종 오류] 체결 데이터 필드를 수색하지 못했습니다.\n\n해당 파트 필드샘플: `{list(out.keys())[:5]}`")
                 return None
                 
             def _clean(val):
@@ -152,7 +162,7 @@ def process_quant_signals(df):
 # =================================================================
 st.set_page_config(page_title="실전 수급 스캐너 (개선판)", layout="centered")
 st.title("🏹 실전 수급 스캐너 (개선판)")
-st.caption(f"💡 현재 화면 데이터 시점: {datetime.now().strftime('%H:%M:%S')} | 📡 가동모드: 실전망 멀티 패킷(output1) 타격 해제")
+st.caption(f"💡 현재 화면 데이터 시점: {datetime.now().strftime('%H:%M:%S')} | 📡 가동모드: 실전망 output2(시세 체결) 정밀 정조준 상태")
 
 # 종목 풀 설정
 if "stock_pool" not in st.session_state:
@@ -164,7 +174,7 @@ if "market_history" not in st.session_state:
 api = KoreaInvestmentOfficialAPI()
 col_left, col_right = st.columns(2)
 
-if col_left.button("🔥 한투 실시간 시세 동기화", type="primary", use_container_width=True, key="btn_sync_live_output1"):
+if col_left.button("🔥 한투 실시간 시세 동기화", type="primary", use_container_width=True, key="btn_sync_live_output2"):
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     for ticker in st.session_state.stock_pool:
@@ -179,7 +189,7 @@ if col_left.button("🔥 한투 실시간 시세 동기화", type="primary", use
             else:
                 st.session_state.market_history[ticker] = pd.concat([st.session_state.market_history[ticker], new_row]).tail(30)
 
-if col_right.button("🧹 캐시 데이터 초기화", use_container_width=True, key="btn_clear_cache_output1"):
+if col_right.button("🧹 캐시 데이터 초기화", use_container_width=True, key="btn_clear_cache_output2"):
     st.session_state.market_history = {}
     if "api_access_token" in st.session_state:
         del st.session_state["api_access_token"]
