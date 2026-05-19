@@ -1,408 +1,112 @@
-# =====================================================================
-# test_scanner.py
-# 단위 테스트 — unittest.mock 기반 (실제 API 호출 없음)
-# =====================================================================
-import unittest
-from unittest.mock import patch, MagicMock, PropertyMock
+import streamlit as st
 import pandas as pd
-import time
-from datetime import datetime, timezone, timedelta
-
-# ---- 테스트 대상 모듈에서 import ----
-# app.py 와 같은 디렉토리에 있다고 가정
-import importlib, sys, types
-
-# Streamlit mock (import 시 st.* 호출 방지)
-st_mock = MagicMock()
-st_mock.secrets = MagicMock()
-st_mock.secrets.get = MagicMock(return_value="")
-sys.modules["streamlit"] = st_mock
-
-# plotly mock
-for mod in ["plotly", "plotly.graph_objects", "plotly.subplots"]:
-    sys.modules.setdefault(mod, MagicMock())
-
-from app import (
-    safe_float, extract_six_digits, is_noise_name,
-    KoreaInvestmentOfficialAPI, RetrySession,
-    BACKUP_MASTER_POOL, RESTRICTED_STAT
-)
-
-
-# =====================================================================
-# safe_float 테스트
-# =====================================================================
-class TestSafeFloat(unittest.TestCase):
-
-    def test_basic_float(self):
-        self.assertAlmostEqual(safe_float("1234.56"), 1234.56)
-
-    def test_comma_separated(self):
-        self.assertAlmostEqual(safe_float("1,234,567"), 1234567.0)
-
-    def test_plus_sign(self):
-        self.assertAlmostEqual(safe_float("+5.23"), 5.23)
-
-    def test_negative_sign(self):
-        # 음수 부호 제거 후 양수로 반환 (현재 구현 기준)
-        self.assertAlmostEqual(safe_float("-3.14"), 3.14)
-
-    def test_percent(self):
-        self.assertAlmostEqual(safe_float("12.5%"), 12.5)
-
-    def test_none(self):
-        self.assertEqual(safe_float(None), 0.0)
-
-    def test_empty(self):
-        self.assertEqual(safe_float(""), 0.0)
-
-    def test_garbage(self):
-        self.assertEqual(safe_float("N/A"), 0.0)
-
-    def test_default_value(self):
-        self.assertEqual(safe_float(None, default=-1.0), -1.0)
-
-    def test_integer(self):
-        self.assertAlmostEqual(safe_float(42), 42.0)
-
-    def test_zero_string(self):
-        self.assertAlmostEqual(safe_float("0"), 0.0)
-
-    def test_scientific_notation(self):
-        self.assertAlmostEqual(safe_float("1.5e3"), 1500.0)
-
-
-# =====================================================================
-# extract_six_digits 테스트
-# =====================================================================
-class TestExtractSixDigits(unittest.TestCase):
-
-    def test_pure_six_digits(self):
-        self.assertEqual(extract_six_digits("005930"), "005930")
-
-    def test_with_prefix_suffix(self):
-        self.assertEqual(extract_six_digits("KR005930KR"), "005930")
-
-    def test_none_input(self):
-        self.assertIsNone(extract_six_digits(None))
-
-    def test_empty_string(self):
-        self.assertIsNone(extract_six_digits(""))
-
-    def test_five_digits(self):
-        self.assertIsNone(extract_six_digits("05930"))
-
-    def test_seven_digits(self):
-        # 7자리 연속은 6자리 경계가 없으므로 None
-        self.assertIsNone(extract_six_digits("0059301"))
-
-    def test_space_separated(self):
-        self.assertEqual(extract_six_digits("code 005930 end"), "005930")
-
-
-# =====================================================================
-# is_noise_name 테스트
-# =====================================================================
-class TestIsNoiseName(unittest.TestCase):
-
-    def test_kodex(self):
-        self.assertTrue(is_noise_name("KODEX200"))
-
-    def test_tiger(self):
-        self.assertTrue(is_noise_name("TIGER 반도체"))
-
-    def test_spac(self):
-        self.assertTrue(is_noise_name("삼성스팩7호"))
-
-    def test_normal_stock(self):
-        self.assertFalse(is_noise_name("삼성전자"))
-
-    def test_reit(self):
-        self.assertTrue(is_noise_name("맥쿼리인프라리츠"))
-
-    def test_empty(self):
-        self.assertFalse(is_noise_name(""))
-
-    def test_none(self):
-        self.assertFalse(is_noise_name(None))
-
-    def test_lowercase_etf(self):
-        self.assertTrue(is_noise_name("kodex 레버리지"))
-
-
-# =====================================================================
-# RetrySession 테스트
-# =====================================================================
-class TestRetrySession(unittest.TestCase):
-
-    def setUp(self):
-        self.retry = RetrySession()
-
-    @patch("requests.Session.request")
-    def test_success_on_first_attempt(self, mock_req):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_req.return_value = mock_resp
-        resp = self.retry.get("http://test.com/api")
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(mock_req.call_count, 1)
-
-    @patch("time.sleep", return_value=None)
-    @patch("requests.Session.request")
-    def test_retry_on_429(self, mock_req, mock_sleep):
-        fail_resp = MagicMock(); fail_resp.status_code = 429
-        ok_resp   = MagicMock(); ok_resp.status_code   = 200
-        mock_req.side_effect = [fail_resp, ok_resp]
-        resp = self.retry.get("http://test.com/api")
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(mock_req.call_count, 2)
-        mock_sleep.assert_called()
-
-    @patch("time.sleep", return_value=None)
-    @patch("requests.Session.request")
-    def test_max_retries_exceeded(self, mock_req, mock_sleep):
-        fail_resp = MagicMock(); fail_resp.status_code = 503
-        mock_req.return_value = fail_resp
-        resp = self.retry.get("http://test.com/api")
-        self.assertIsNone(resp)
-
-    @patch("requests.Session.request", side_effect=__import__("requests").ConnectionError("fail"))
-    def test_connection_error_returns_none(self, mock_req):
-        resp = self.retry.get("http://test.com/api")
-        self.assertIsNone(resp)
-
-    @patch("time.sleep", return_value=None)
-    @patch("requests.Session.request", side_effect=__import__("requests").Timeout)
-    def test_timeout_returns_none_after_retries(self, mock_req, mock_sleep):
-        resp = self.retry.get("http://test.com/api")
-        self.assertIsNone(resp)
-
-
-# =====================================================================
-# KoreaInvestmentOfficialAPI — 토큰 캐시 테스트
-# =====================================================================
-class TestTokenCache(unittest.TestCase):
-
-    def _make_api(self) -> KoreaInvestmentOfficialAPI:
-        api = KoreaInvestmentOfficialAPI(app_key="TEST_KEY", app_secret="TEST_SECRET")
-        return api
-
-    def _mock_token_response(self, token="MOCK_TOKEN", expires_in=86400, expired_at=None):
-        resp = MagicMock()
-        resp.status_code = 200
-        payload = {"access_token": token, "token_type": "Bearer", "expires_in": expires_in}
-        if expired_at:
-            payload["token_expired_at"] = expired_at
-        resp.json.return_value = payload
-        return resp
-
-    @patch.object(RetrySession, "post")
-    def test_token_issued_on_first_call(self, mock_post):
-        mock_post.return_value = self._mock_token_response()
-        api = self._make_api()
-        token = api.get_fresh_access_token()
-        self.assertEqual(token, "MOCK_TOKEN")
-        self.assertEqual(mock_post.call_count, 1)
-
-    @patch.object(RetrySession, "post")
-    def test_token_cached_on_second_call(self, mock_post):
-        mock_post.return_value = self._mock_token_response()
-        api = self._make_api()
-        api.get_fresh_access_token()
-        api.get_fresh_access_token()  # 두번째 호출 — 캐시 사용
-        self.assertEqual(mock_post.call_count, 1)
-
-    @patch.object(RetrySession, "post")
-    def test_expired_token_triggers_refresh(self, mock_post):
-        mock_post.return_value = self._mock_token_response()
-        api = self._make_api()
-        api.get_fresh_access_token()
-        # 만료 시각을 과거로 조작
-        api._token_cache["expires_at"] = datetime.now(tz=timezone.utc) - timedelta(seconds=100)
-        api.get_fresh_access_token()  # 재발급 트리거
-        self.assertEqual(mock_post.call_count, 2)
-
-    @patch.object(RetrySession, "post")
-    def test_force_refresh_ignores_cache(self, mock_post):
-        mock_post.return_value = self._mock_token_response()
-        api = self._make_api()
-        api.get_fresh_access_token()
-        api.get_fresh_access_token(force_refresh=True)  # 강제 갱신
-        self.assertEqual(mock_post.call_count, 2)
-
-    @patch.object(RetrySession, "post")
-    def test_token_expired_at_string_parsed(self, mock_post):
-        future = (datetime.now() + timedelta(hours=12)).strftime("%Y-%m-%d %H:%M:%S")
-        mock_post.return_value = self._mock_token_response(expired_at=future)
-        api = self._make_api()
-        api.get_fresh_access_token()
-        self.assertIsNotNone(api._token_cache["expires_at"])
-
-    @patch.object(RetrySession, "post", return_value=None)
-    def test_token_returns_none_on_network_failure(self, _):
-        api = self._make_api()
-        result = api.get_fresh_access_token()
-        self.assertIsNone(result)
-
-    @patch.object(RetrySession, "post")
-    def test_token_returns_none_on_http_error(self, mock_post):
-        err_resp = MagicMock(); err_resp.status_code = 401; err_resp.text = "Unauthorized"
-        mock_post.return_value = err_resp
-        api = self._make_api()
-        result = api.get_fresh_access_token()
-        self.assertIsNone(result)
-
-
-# =====================================================================
-# KoreaInvestmentOfficialAPI — get_market_leading_tickers 테스트
-# =====================================================================
-class TestGetMarketLeadingTickers(unittest.TestCase):
-
-    def _make_api(self):
-        return KoreaInvestmentOfficialAPI(app_key="K", app_secret="S")
-
-    def _make_item(self, ticker, name):
-        return {"mksc_shrn_iscd": ticker, "hts_kor_isnm": name}
-
-    @patch.object(KoreaInvestmentOfficialAPI, "_api_get")
-    def test_normal_response(self, mock_get):
-        mock_get.return_value = {"output": [
-            self._make_item("005930", "삼성전자"),
-            self._make_item("000660", "SK하이닉스")
-        ]}
-        api   = self._make_api()
-        pool  = api.get_market_leading_tickers("TOKEN")
-        codes = [t for t, _ in pool]
-        self.assertIn("005930", codes)
-        self.assertIn("000660", codes)
-
-    @patch.object(KoreaInvestmentOfficialAPI, "_api_get")
-    def test_noise_filtered(self, mock_get):
-        mock_get.return_value = {"output": [
-            self._make_item("069500", "KODEX200"),
-            self._make_item("005930", "삼성전자")
-        ]}
-        api  = self._make_api()
-        pool = api.get_market_leading_tickers("TOKEN")
-        codes = [t for t, _ in pool]
-        self.assertNotIn("069500", codes)
-        self.assertIn("005930", codes)
-
-    @patch.object(KoreaInvestmentOfficialAPI, "_api_get", return_value=None)
-    def test_fallback_to_backup_on_api_fail(self, _):
-        api  = self._make_api()
-        pool = api.get_market_leading_tickers("TOKEN")
-        self.assertEqual(pool, BACKUP_MASTER_POOL)
-
-    @patch.object(KoreaInvestmentOfficialAPI, "_api_get")
-    def test_empty_output_fallback(self, mock_get):
-        mock_get.return_value = {"output": []}
-        api  = self._make_api()
-        pool = api.get_market_leading_tickers("TOKEN")
-        self.assertEqual(pool, BACKUP_MASTER_POOL)
-
-    @patch.object(KoreaInvestmentOfficialAPI, "_api_get")
-    def test_dict_output_normalized(self, mock_get):
-        # output이 dict인 경우 리스트로 정규화
-        mock_get.return_value = {"output": self._make_item("005930", "삼성전자")}
-        api  = self._make_api()
-        pool = api.get_market_leading_tickers("TOKEN")
-        codes = [t for t, _ in pool]
-        self.assertIn("005930", codes)
-
-
-# =====================================================================
-# KoreaInvestmentOfficialAPI — get_realtime_price 테스트
-# =====================================================================
-class TestGetRealtimePrice(unittest.TestCase):
-
-    def _make_api(self):
-        return KoreaInvestmentOfficialAPI(app_key="K", app_secret="S")
-
-    def _normal_output(self, ticker="005930", name="삼성전자", price="72000", ctrt="1.50", stat="00"):
-        return {
-            "output": {
-                "hts_kor_isnm":       name,
-                "stck_prpr":          price,
-                "stck_hgpr":          "73000",
-                "stck_lwpr":          "71000",
-                "accl_tr_vol":        "1234567",
-                "prdy_ctrt":          ctrt,
-                "iscd_stat_cls_code": stat
-            }
-        }
-
-    @patch.object(KoreaInvestmentOfficialAPI, "_api_get")
-    def test_normal_price_parsed(self, mock_get):
-        mock_get.return_value = self._normal_output()
-        api  = self._make_api()
-        data = api.get_realtime_price("005930", "TOKEN")
-        self.assertIsNotNone(data)
-        self.assertAlmostEqual(data["Close"],    72000.0)
-        self.assertAlmostEqual(data["High"],     73000.0)
-        self.assertAlmostEqual(data["Low"],      71000.0)
-        self.assertAlmostEqual(data["PrdyCtrt"], 1.50)
-
-    @patch.object(KoreaInvestmentOfficialAPI, "_api_get")
-    def test_restricted_stock_detected(self, mock_get):
-        mock_get.return_value = self._normal_output(stat="51")
-        api  = self._make_api()
-        data = api.get_realtime_price("005930", "TOKEN")
-        self.assertTrue(data["is_restricted"])
-
-    @patch.object(KoreaInvestmentOfficialAPI, "_api_get")
-    def test_zero_price_returns_none(self, mock_get):
-        mock_get.return_value = self._normal_output(price="0")
-        api  = self._make_api()
-        data = api.get_realtime_price("005930", "TOKEN")
-        self.assertIsNone(data)
-
-    @patch.object(KoreaInvestmentOfficialAPI, "_api_get", return_value=None)
-    def test_api_fail_returns_none(self, _):
-        api  = self._make_api()
-        data = api.get_realtime_price("005930", "TOKEN")
-        self.assertIsNone(data)
-
-    @patch.object(KoreaInvestmentOfficialAPI, "_api_get")
-    def test_comma_in_price_handled(self, mock_get):
-        mock_get.return_value = self._normal_output(price="72,000")
-        api  = self._make_api()
-        data = api.get_realtime_price("005930", "TOKEN")
-        self.assertIsNotNone(data)
-        self.assertAlmostEqual(data["Close"], 72000.0)
-
-    @patch.object(KoreaInvestmentOfficialAPI, "_api_get")
-    def test_default_name_used_when_hts_empty(self, mock_get):
-        out = self._normal_output()
-        out["output"]["hts_kor_isnm"] = ""
-        mock_get.return_value = out
-        api  = self._make_api()
-        data = api.get_realtime_price("005930", "TOKEN", default_name="기본종목명")
-        self.assertEqual(data["name"], "기본종목명")
-
-    @patch.object(KoreaInvestmentOfficialAPI, "_api_get")
-    def test_output1_fallback(self, mock_get):
-        # output 없이 output1에 데이터가 있는 경우
-        mock_get.return_value = {
-            "output1": {
-                "hts_kor_isnm": "삼성전자", "stck_prpr": "72000",
-                "stck_hgpr": "73000",       "stck_lwpr": "71000",
-                "accl_tr_vol": "1000000",   "prdy_ctrt": "1.50",
-                "iscd_stat_cls_code": "00"
-            }
-        }
-        api  = self._make_api()
-        data = api.get_realtime_price("005930", "TOKEN")
-        self.assertIsNotNone(data)
-
-    def test_no_token_returns_none(self):
-        api  = self._make_api()
-        data = api.get_realtime_price("005930", token="")
-        self.assertIsNone(data)
-
-
-# =====================================================================
-# 엔트리포인트
-# =====================================================================
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+import asyncio
+import httpx
+from datetime import datetime
+
+# =================================================================
+# 🔑 환경설정
+# =================================================================
+APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
+APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
+
+# 10,000원 이상 우량주 백업 리스트
+BACKUP_MASTER_POOL = [
+    ("005930", "삼성전자"), ("000660", "SK하이닉스"), ("005380", "현대차"), ("000270", "기아"),
+    ("068270", "셀트리온"), ("035420", "NAVER"), ("005490", "POSCO홀딩스"), ("051910", "LG화학"),
+    ("006400", "삼성SDI"), ("035720", "카카오"), ("439960", "코스모로보틱스"), ("000670", "영풍"),
+    ("012450", "한화에어로스페이스"), ("009830", "한화솔루션"), ("034020", "두산에너빌리티"), ("010140", "삼성중공업"),
+    ("015760", "한국전력"), ("004020", "현대제철"), ("011780", "금호석유"), ("010950", "S-Oil")
+]
+
+if "price_cache" not in st.session_state: st.session_state.price_cache = {}
+if "active_pool" not in st.session_state: st.session_state.active_pool = {t: n for t, n in BACKUP_MASTER_POOL}
+
+# =================================================================
+# 🚀 데이터 수집 엔진 (10,000원 필터링 핵심)
+# =================================================================
+async def get_token(client):
+    url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
+    resp = await client.post(url, json={"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET})
+    return resp.json().get("access_token")
+
+async def fetch_pool(client, token):
+    url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
+    headers = {"authorization": f"Bearer {token}", "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01710000"}
+    params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20171", "FID_INPUT_ISCD": "0000", "FID_SORT_CLS_CODE": "1"}
+    try:
+        resp = await client.get(url, headers=headers, params=params, timeout=4.0)
+        output = resp.json().get("output", [])
+        pool = {}
+        for item in output:
+            price = float(item.get("stck_prpr", 0))
+            name = item.get("hts_kor_isnm", "")
+            # 10,000원 미만 필터링 및 제외 대상 필터링
+            if price >= 10000 and not any(k in name for k in ["우", "스팩", "리츠", "인버스", "KODEX", "TIGER"]):
+                pool[str(item.get("mksc_shrn_iscd", ""))] = name
+            if len(pool) >= 20: break
+        return pool if pool else {t: n for t, n in BACKUP_MASTER_POOL}
+    except: return {t: n for t, n in BACKUP_MASTER_POOL}
+
+async def fetch_price(client, token, ticker, name, delay):
+    await asyncio.sleep(delay)
+    headers = {"authorization": f"Bearer {token}", "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01010000"}
+    try:
+        resp = await client.get("https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price", 
+                                headers=headers, params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker}, timeout=2.0)
+        out = resp.json().get("output", {})
+        return {"ticker": ticker, "name": name, "price": float(out.get("stck_prpr", 0)), 
+                "ctrt": float(out.get("prdy_ctrt", 0.0)), "vol": float(out.get("acml_vol", 0)), "time": datetime.now().strftime("%H:%M:%S")}
+    except: return None
+
+async def run_scanner():
+    async with httpx.AsyncClient() as client:
+        token = await get_token(client)
+        if not token: return
+        st.session_state.active_pool = await fetch_pool(client, token)
+        tasks = [fetch_price(client, token, t, n, i*0.1) for i, (t, n) in enumerate(st.session_state.active_pool.items())]
+        results = await asyncio.gather(*tasks)
+        for res in results:
+            if res: st.session_state.price_cache[res["ticker"]] = res
+
+# =================================================================
+# 🖥️ 화면 출력부
+# =================================================================
+st.set_page_config(page_title="주도주 스캐너", layout="wide")
+st.title("🎯 10,000원 이상 우량 주도주 실시간 스캐너")
+
+# 🔄 시세 갱신 제어 영역
+col_ctrl, col_info = st.columns([3, 5])
+if col_ctrl.button("🔄 실시간 시세 갱신", type="primary", use_container_width=True):
+    asyncio.run(run_scanner())
+    st.rerun()
+
+# 데이터 수합 및 정렬용 데이터 프레임 빌드
+display_list = []
+for ticker, name in st.session_state.active_pool.items():
+    c = st.session_state.price_cache.get(ticker, {})
+    display_list.append({
+        "종목명": name,
+        "현재가": f"{int(c.get('price', 0)):,}원" if c.get('price') else "데이터 대기중",
+        "등락률": f"{c.get('ctrt', 0.0):+.2f}%",
+        "거래량": f"{int(c.get('vol', 0)):,}주",
+        "최근시각": c.get('time', '-')
+    })
+
+if display_list:
+    df_display = pd.DataFrame(display_list)
+    # 등락률 기준으로 정렬 가공
+    df_display["sort_val"] = df_display["등락률"].str.replace("%", "").astype(float)
+    df_display = df_display.sort_values(by="sort_val", ascending=False).reset_index(drop=True)
+    df_display = df_display.drop(columns=["sort_val"])
+    
+    # 가독성을 위한 순위 칼럼 수동 주입
+    df_display.insert(0, "순위", [f"{i+1}위" for i in range(len(df_display))])
+    
+    # 🎯 [우측 상단 현황 표기] 총 몇 개가 로딩되었는지 직관적으로 출력
+    col_info.markdown(f"### 📊 현재 수급 포착: **{len(df_display)}개 종목** 전량 모니터링 중")
+    
+    # 🎯 [핵심 보정] height=750 옵션으로 잘림 현상 완벽 제거 (20개가 스크롤 없이 시원하게 다 노출됨)
+    st.dataframe(df_display, use_container_width=True, hide_index=True, height=750)
+else:
+    st.info("데이터가 비어있습니다. 위 갱신 버튼을 눌러주세요.")
