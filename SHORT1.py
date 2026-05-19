@@ -5,7 +5,7 @@ import requests
 from datetime import datetime, timedelta
 import logging
 
-# 로깅 설정 (시스템 내부 추적용)
+# 로깅 설정
 logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -17,25 +17,32 @@ APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 HTS_ID = st.secrets.get("HANTU_HTS_ID", "my_htsid").strip()
 
 # =================================================================
-# 🏦 한투 실전/모의 자동 감지 및 교차 통신 엔진 (404 에러 완벽 방어)
+# 🏦 한투 실전/모의 서버 수동 선택 지정 엔진 (404 완벽 디버깅용)
 # =================================================================
 class KoreaInvestmentOfficialAPI:
-    def __init__(self):
-        # 404 에러 방지: 실전(9443) 주소를 기본으로 하되, 실패 시 모의(29443)로 자동 전환
-        self.prod_url = "https://openapi.koreainvestment.com:9443"
-        self.vps_url = "https://openapivts.koreainvestment.com:29443"
-        self.base_url = self.prod_url # 초기 설정값은 실전망
-        
+    def __init__(self, target_mode):
+        # 유저가 선택한 모드에 따라 주소와 TR_ID를 완벽하게 고정 분기합니다.
+        if target_mode == "💰 실전투자망":
+            self.base_url = "https://openapi.koreainvestment.com:9443"
+            self.tr_id = "FHKST01010200"
+            self.mode_name = "실전망"
+        else:
+            self.base_url = "https://openapivts.koreainvestment.com:29443"
+            self.tr_id = "VTKST01010200"
+            self.mode_name = "모의망"
+            
         self.app_key = APP_KEY
         self.app_secret = APP_SECRET
         self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         self.session = requests.Session()
 
     def get_access_token(self):
-        """서버 환경별 인증 토큰 발급 및 세션 캐싱"""
+        """선택된 서버 주소로 인증 토큰 발급"""
+        # 세션에 저장된 토큰이 있고, 유효 기간이 남았으며, 현재 가동 주소와 일치할 때만 캐싱 사용
         if "api_access_token" in st.session_state and st.session_state.api_access_token:
             if "token_expire_time" in st.session_state and datetime.now() < st.session_state.token_expire_time:
-                return st.session_state.api_access_token
+                if st.session_state.get("current_cached_mode") == self.mode_name:
+                    return st.session_state.api_access_token
         
         try:
             url = f"{self.base_url}/oauth2/tokenP"
@@ -44,15 +51,11 @@ class KoreaInvestmentOfficialAPI:
             
             response = self.session.post(url, headers=headers, json=data, timeout=5.0)
             
-            # [핵심] 실전 주소에서 404가 나면 즉시 모의투자(vps) 주소로 자동 교체 후 재시도
-            if response.status_code == 404 and self.base_url == self.prod_url:
-                logger.warning("🌐 실전 서버 404 감지: 모의투자(vps) 서버로 자동 전환합니다.")
-                self.base_url = self.vps_url
-                url = f"{self.base_url}/oauth2/tokenP"
-                response = self.session.post(url, headers=headers, json=data, timeout=5.0)
-
             if response.status_code != 200:
-                st.session_state.last_api_error = f"🚨 [인증 실패] 계좌 설정 및 키 타입을 확인하세요. (HTTP {response.status_code})"
+                st.session_state.last_api_error = (
+                    f"🚨 [인증 404/에러] {self.mode_name} 접속 실패 (HTTP {response.status_code}). "
+                    f"현재 발급받으신 Key 종류와 좌측 사이드바의 '서버 망 선택'이 일치하는지 확인하십시오!"
+                )
                 return None
                 
             res_json = response.json()
@@ -60,6 +63,7 @@ class KoreaInvestmentOfficialAPI:
             if token:
                 st.session_state.api_access_token = token
                 st.session_state.token_expire_time = datetime.now() + timedelta(hours=11)
+                st.session_state.current_cached_mode = self.mode_name
                 return token
             
             st.session_state.last_api_error = f"🚨 [인증 거부] 서버 메시지: {res_json.get('msg1')}"
@@ -69,22 +73,17 @@ class KoreaInvestmentOfficialAPI:
             return None
 
     def get_realtime_price(self, ticker):
-        """망 상태에 따른 실시간 시세 호출 및 가변 TR_ID 세팅"""
         access_token = self.get_access_token()
         if not access_token:
             return None
             
         url = f"{self.base_url}/uapi/domestic-stock/v1/quoting/inquire-price"
-        
-        # 실전망(FHKST...)과 모의망(VTKST...)의 TR ID 분기 처리
-        current_tr_id = "FHKST01010200" if self.base_url == self.prod_url else "VTKST01010200"
-        
         headers = {
             "content-type": "application/json; charset=utf-8",
             "authorization": f"Bearer {access_token}",
             "appkey": self.app_key,
             "appsecret": self.app_secret,
-            "tr_id": current_tr_id, 
+            "tr_id": self.tr_id, 
             "custtype": "P",           
             "User-Agent": self.user_agent
         }
@@ -97,7 +96,7 @@ class KoreaInvestmentOfficialAPI:
             response = self.session.get(url, headers=headers, params=params, timeout=5.0)
             
             if response.status_code != 200:
-                st.session_state.last_api_error = f"🚨 [시세 호출 실패] 한투 응답 에러 (HTTP {response.status_code})"
+                st.session_state.last_api_error = f"🚨 [시세 호출 실패] {self.mode_name} 주소 매핑 에러 (HTTP {response.status_code})"
                 return None
                 
             res_json = response.json()
@@ -114,11 +113,9 @@ class KoreaInvestmentOfficialAPI:
                 raw_vol = str(res_data.get("accl_tr_vol", "1.0")).strip()
                 volume = float(raw_vol) if raw_vol and raw_vol != "0" else 1.0
                 
-                # 어떤 망으로 연결되어 정상 작동 중인지 명시
-                source_name = "한투 실전망 연결 성공" if self.base_url == self.prod_url else "한투 모의망 연결 성공"
                 return {
                     "Close": current_price, "High": high_price, "Low": low_price,
-                    "Volume": volume, "Source": source_name
+                    "Volume": volume, "Source": f"한투 {self.mode_name} 직결 완료"
                 }
             return None
         except Exception as e:
@@ -136,7 +133,6 @@ def get_stock_name(ticker):
     return STOCK_NAME_MAP.get(ticker, f"종목({ticker})")
 
 def process_quant_signals(df):
-    """실전 퀀트 수급 돌파 알고리즘"""
     if len(df) < 2:
         df['VWAP'] = df['Close']; df['RSI'] = 50.0; df['Local_High'] = df['High']; df['타이밍 신호'] = "🟢 관망"
         return df
@@ -168,6 +164,18 @@ def process_quant_signals(df):
 # =================================================================
 st.set_page_config(page_title="실전 수급 스캐너", layout="centered")
 
+# 🚨 [중요] 사이드바에 서버 강제 선택 스위치 배치
+st.sidebar.markdown("### 🌐 한투 통신망 설정")
+selected_market_mode = st.sidebar.radio(
+    "서버 망 선택 (404 해결용)",
+    ["💰 실전투자망", "🧪 모의투자망"],
+    help="한투에서 발급받은 App Key의 종류와 일치해야 404 오류가 나지 않습니다."
+)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📋 종목 관리")
+raw_input_tickers = st.sidebar.text_area("종목코드 입력", placeholder="예: 005930", height=70)
+
 if "custom_stock_pool" not in st.session_state:
     st.session_state.custom_stock_pool = ["005930", "000660", "005380", "000270"]
 if "multi_market_data" not in st.session_state:
@@ -175,8 +183,6 @@ if "multi_market_data" not in st.session_state:
 if "last_api_error" not in st.session_state:
     st.session_state.last_api_error = None
 
-st.sidebar.markdown("### 📋 종목 관리")
-raw_input_tickers = st.sidebar.text_area("종목코드 입력", placeholder="예: 005930", height=70)
 if st.sidebar.button("⚡ 종목 등록", use_container_width=True):
     if raw_input_tickers.strip():
         clean_tickers = [t.strip() for t in raw_input_tickers.split() if len(t.strip()) == 6]
@@ -185,19 +191,20 @@ if st.sidebar.button("⚡ 종목 등록", use_container_width=True):
             st.rerun()
 
 st.markdown("### 🏹 실전 수급 돌파 스캐너 (공식 표준 수동 모드)")
-st.caption(f"💡 현재 화면 데이터 시점: {datetime.now().strftime('%H:%M:%S')}")
+st.caption(f"💡 현재 화면 데이터 시점: {datetime.now().strftime('%H:%M:%S')} | 📡 가동망: {selected_market_mode}")
 
 if st.session_state.last_api_error:
     st.error(st.session_state.last_api_error)
 else:
-    st.info("🟢 통신 상태: 준비 완료 (조회 버튼을 누르면 한투 최신 API를 실시간 호출합니다)")
+    st.info(f"🟢 통신 상태: 준비 완료 ({selected_market_mode} 연결 대기 중)")
 
 col_btn1, col_btn2 = st.columns(2)
 click_refresh = col_btn1.button("🔥 [클릭] 한투 실시간 시세 조회/갱신", type="primary", use_container_width=True)
 
-if col_btn2.button("🧹 데이터 초기화 (캐시 청소)", use_container_width=True):
+if col_btn2.button("🧹 데이터 초기화 (망 전환시 필수 클릭)", use_container_width=True):
     st.session_state.multi_market_data = {}
     st.session_state.last_api_error = None
+    if "api_access_token" in st.session_state: del st.session_state["api_access_token"]
     st.rerun()
 
 if not APP_KEY or not APP_SECRET:
@@ -206,7 +213,7 @@ if not APP_KEY or not APP_SECRET:
 # =================================================================
 # ⚙️ 실시간 데이터 프로세싱 파이프라인
 # =================================================================
-api = KoreaInvestmentOfficialAPI()
+api = KoreaInvestmentOfficialAPI(selected_market_mode)
 current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 if click_refresh:
@@ -242,7 +249,7 @@ for ticker in st.session_state.custom_stock_pool:
         data_source_text = "🛑 대기중"
     else:
         df_frame = st.session_state.multi_market_data[ticker].copy()
-        data_source_text = live_tick["Source"] if 'live_tick' in locals() and live_tick else "연결 성공"
+        data_source_text = live_tick["Source"] if 'live_tick' in locals() and live_tick else "연결 완료"
 
     calculated_df = process_quant_signals(df_frame)
     latest_info = calculated_df.iloc[-1]
