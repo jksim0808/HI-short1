@@ -165,13 +165,8 @@ if st.session_state.last_api_error:
 else:
     st.info("🟢 통신 상태: 정상 (조회 버튼을 누르면 실시간 가격을 원샷 요청합니다)")
 
-# 버튼 트리거 플래그 설정
-trigger_fetch = False
-
 col_btn1, col_btn2 = st.columns(2)
-if col_btn1.button("🔥 [클릭] 한투 실시간 시세 조회/갱신", type="primary", use_container_width=True):
-    st.session_state.last_api_error = None
-    trigger_fetch = True  # 버튼 클릭 시에만 한투 조회 권한 승인
+click_refresh = col_btn1.button("🔥 [클릭] 한투 실시간 시세 조회/갱신", type="primary", use_container_width=True)
 
 if col_btn2.button("🧹 데이터 초기화 (캐시 청소)", use_container_width=True):
     st.session_state.multi_market_data = {}
@@ -186,38 +181,47 @@ if not APP_KEY or not APP_SECRET:
 # =================================================================
 api = KoreaInvestmentAPI()
 current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-summary_rows = []
 
-for ticker in st.session_state.custom_stock_pool:
-    live_tick = None
-    
-    # 🔥 오직 사용자가 버튼을 눌렀을 때만 한투 서버와 직접 무전 통신을 감행합니다.
-    if trigger_fetch:
+# 🔥 사용자가 버튼을 클릭한 순간 즉시 루프를 돌려 한투 데이터를 강제로 세션에 주입
+if click_refresh:
+    st.session_state.last_api_error = None
+    for ticker in st.session_state.custom_stock_pool:
         live_tick = api.get_realtime_price(ticker)
-    
-    # 통신에 실패했거나 버튼을 누르지 않은 평상시 상태의 기본 프레임워크 설정
-    if not live_tick:
-        live_tick = {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 0.0, "Source": "🛑 대기중 (위 버튼을 누르세요)"}
+        if live_tick and live_tick["Close"] > 0:
+            # 기존 데이터가 없다면 기본 프레임 생성
+            if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
+                init_rows = []
+                init_times = []
+                base_p = live_tick["Close"]
+                for i in range(5, 0, -1):
+                    time_str = (datetime.now() - timedelta(minutes=i)).strftime('%Y-%m-%d %H:%M:%S')
+                    init_times.append(pd.to_datetime(time_str))
+                    init_rows.append({"Close": base_p, "High": base_p, "Low": base_p, "Volume": 100.0})
+                st.session_state.multi_market_data[ticker] = pd.DataFrame(init_rows, index=init_times)
+            
+            # 실시간 새 데이터 누적 결합
+            new_df = pd.DataFrame([{"Close": live_tick["Close"], "High": live_tick["High"], "Low": live_tick["Low"], "Volume": live_tick["Volume"]}], index=[pd.to_datetime(current_time_str)])
+            st.session_state.multi_market_data[ticker] = pd.concat([st.session_state.multi_market_data[ticker], new_df])
+            st.session_state.multi_market_data[ticker] = st.session_state.multi_market_data[ticker].loc[~st.session_state.multi_market_data[ticker].index.duplicated(keep='last')].tail(15)
 
-    # 해당 종목의 데이터프레임이 비어있다면 임시 베이스라인 빌드
+# 화면에 뿌려줄 데이터 구조 최종 빌드 단계
+summary_rows = []
+for ticker in st.session_state.custom_stock_pool:
+    # 캐시에 아직 아무것도 없을 때만 초기 대기 가짜 기본틀 생성
     if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
         init_rows = []
         init_times = []
-        base_p = live_tick["Close"] if live_tick["Close"] > 0 else 50000.0
         for i in range(5, 0, -1):
             time_str = (datetime.now() - timedelta(minutes=i)).strftime('%Y-%m-%d %H:%M:%S')
             init_times.append(pd.to_datetime(time_str))
-            init_rows.append({"Close": base_p, "High": base_p, "Low": base_p, "Volume": 100.0})
-        st.session_state.multi_market_data[ticker] = pd.DataFrame(init_rows, index=init_times)
+            init_rows.append({"Close": 50000.0, "High": 50000.0, "Low": 50000.0, "Volume": 0.0})
+        df_frame = pd.DataFrame(init_rows, index=init_times)
+        data_source_text = "🛑 대기중 (위 버튼을 누르세요)"
+    else:
+        df_frame = st.session_state.multi_market_data[ticker].copy()
+        data_source_text = "한투 실시간 시세"
 
-    # 한투로부터 성공적으로 유효 시세를 취득한 경우 데이터셋에 강제 마킹
-    if live_tick["Close"] > 0:
-        new_df = pd.DataFrame([{"Close": live_tick["Close"], "High": live_tick["High"], "Low": live_tick["Low"], "Volume": live_tick["Volume"]}], index=[pd.to_datetime(current_time_str)])
-        st.session_state.multi_market_data[ticker] = pd.concat([st.session_state.multi_market_data[ticker], new_df])
-        st.session_state.multi_market_data[ticker] = st.session_state.multi_market_data[ticker].loc[~st.session_state.multi_market_data[ticker].index.duplicated(keep='last')].tail(15)
-
-    # 퀀트 스캔 계측기 가동
-    calculated_df = process_quant_signals(st.session_state.multi_market_data[ticker].copy())
+    calculated_df = process_quant_signals(df_frame)
     latest_info = calculated_df.iloc[-1]
     
     realtime_trading_value = latest_info['Close'] * latest_info['Volume']
@@ -229,7 +233,7 @@ for ticker in st.session_state.custom_stock_pool:
         "종목코드": ticker, "종목명": get_stock_name(ticker), "현재 타이밍 신호": latest_info["타이밍 신호"],
         "현재가": int(latest_info['Close']), "수급선": int(latest_info['VWAP']), "RSI": int(latest_info["RSI"]),
         "저항선": int(latest_info['Local_High']), "실시간거래대금": realtime_trading_value, "신호가중치": signal_weight,
-        "데이터출처": live_tick.get("Source", "대기 중")
+        "데이터출처": data_source_text
     })
 
 st.markdown("---")
@@ -240,7 +244,8 @@ st.markdown("---")
 if summary_rows:
     summary_df = pd.DataFrame(summary_rows).sort_values(by=['신호가중치', '실시간거래대금'], ascending=[True, False]).reset_index(drop=True)
     
-    if trigger_fetch and not summary_df[summary_df["신호가중치"] == 0].empty:
+    # 버튼을 누른 순간 매수 신호가 잡히면 벨소리 재생
+    if click_refresh and not summary_df[summary_df["신호가중치"] == 0].empty:
         st.audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg") 
 
     for index, row in summary_df.iterrows():
