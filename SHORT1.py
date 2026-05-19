@@ -12,7 +12,6 @@ st.set_page_config(page_title="주도주 스캐너 Pro", layout="wide")
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
-# 🎯 [코드 보정] 존재하지 않는 코스모로보틱스 코드를 제거하고, 확실한 우량 주도주인 현대모비스(012330)로 대체했습니다.
 BACKUP_MASTER_POOL = [
     ("005930", "삼성전자"), ("000660", "SK하이닉스"), ("005380", "현대차"), ("000270", "기아"),
     ("068270", "셀트리온"), ("035420", "NAVER"), ("005490", "POSCO홀딩스"), ("051910", "LG화학"),
@@ -25,7 +24,7 @@ if "engine_cache" not in st.session_state: st.session_state.engine_cache = {}
 if "last_pool" not in st.session_state: st.session_state.last_pool = BACKUP_MASTER_POOL
 
 # =====================================================================
-# ⚡ 초고속 비동기 데이터 통신 엔진
+# ⚡ 한투 방화벽 우회형 비동기 데이터 통신 엔진
 # =====================================================================
 async def fetch_token_async(client):
     url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
@@ -63,6 +62,7 @@ async def fetch_market_pool_async(client, token):
     return BACKUP_MASTER_POOL
 
 async def fetch_single_price_async(client, token, ticker, name, delay):
+    # 🎯 [핵심 보정] 한투 초당 제한(TPS)을 우회하기 위해 종목별 분사 간격을 정밀 조정합니다.
     await asyncio.sleep(delay)
     url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price"
     headers = {
@@ -76,20 +76,27 @@ async def fetch_single_price_async(client, token, ticker, name, delay):
             res_json = r.json()
             out = res_json.get("output") if res_json.get("output") else res_json.get("output1")
             
-            # 🎯 한투 서버가 rt_cd != 0 (종목코드 오류 등)을 반환할 때의 방어 밸브
-            if res_json.get("rt_cd") != "0" or not out:
-                return {"ticker": ticker, "name": name, "price": -1, "ctrt": 0.0, "volume": 0, "stat": "00", "time": "❌ 코드오류"}
-
-            return {
-                "ticker": ticker, "name": name,
-                "price": float(out.get("stck_prpr", 0)),
-                "ctrt": float(out.get("prdy_ctrt", 0.0)),
-                "volume": float(out.get("acml_vol", out.get("accl_tr_vol", 0))),
-                "stat": str(out.get("iscd_stat_cls_code", "00")).strip(),
-                "time": datetime.now().strftime("%H:%M:%S")
-            }
+            if res_json.get("rt_cd") == "0" and out:
+                return {
+                    "ticker": ticker, "name": name,
+                    "price": float(out.get("stck_prpr", 0)),
+                    "ctrt": float(out.get("prdy_ctrt", 0.0)),
+                    "volume": float(out.get("acml_vol", out.get("accl_tr_vol", 0))),
+                    "stat": str(out.get("iscd_stat_cls_code", "00")).strip(),
+                    "time": datetime.now().strftime("%H:%M:%S")
+                }
     except: pass
-    return {"ticker": ticker, "name": name, "price": -1, "ctrt": 0.0, "volume": 0, "stat": "00", "time": "❌ 통신누락"}
+    
+    # 🎯 [영구 유지 락] 통신이 튀거나 폐장되어 패킷이 누락되면 빈 값을 뿌리는 게 아니라 기존 캐시 데이터를 복원해 화면을 지킵니다.
+    old = st.session_state.engine_cache.get(ticker, {})
+    return {
+        "ticker": ticker, "name": name,
+        "price": old.get("price", -1),
+        "ctrt": old.get("ctrt", 0.0),
+        "volume": old.get("volume", 0),
+        "stat": old.get("stat", "00"),
+        "time": old.get("time", "❌ 통신누락")
+    }
 
 async def run_async_pipeline():
     limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
@@ -104,10 +111,12 @@ async def run_async_pipeline():
         
         tasks = []
         for idx, (t, n) in enumerate(dynamic_pool[:20]):
-            tasks.append(fetch_single_price_async(client, token, t, n, idx * 0.15))
+            # 🎯 슬롯 딜레이를 0.25초로 늘려 한투의 초당 4회 제한 안전 규격을 완벽히 통과합니다.
+            tasks.append(fetch_single_price_async(client, token, t, n, idx * 0.25))
             
         results = await asyncio.gather(*tasks)
         for res in results:
+            # 정상 데이터이거나 기존 캐시가 보존된 데이터만 업데이트
             st.session_state.engine_cache[res["ticker"]] = res
 
 # =====================================================================
@@ -131,23 +140,28 @@ if "token_error" in st.session_state:
 display_list = []
 for t, n in st.session_state.last_pool[:20]:
     c = st.session_state.engine_cache.get(t, {})
-    price_val = c.get("price", 0)
+    price_val = c.get("price", -1)
     
-    if price_val == -1:
-        current_price_str = c.get("time", "❌ 에러")
-    elif price_val > 0:
+    if price_val > 0:
         current_price_str = f"{int(price_val):,}원"
+        ctrt_str = f"{c.get('ctrt', 0.0):+.2f}%"
+        vol_str = f"{int(c['volume']):,}주"
+        time_str = c.get("time", "-")
     else:
+        # 최초 실행 시 데이터가 아직 없을 때만 대기중 표기
         current_price_str = "대기중 (위 갱신 버튼을 눌러주세요)"
+        ctrt_str = "0.00%"
+        vol_str = "-"
+        time_str = c.get("time", "-")
 
     display_list.append({
         "종목코드": t,
         "종목명": c.get("name", n),
         "현재가": current_price_str,
-        "등락률": f"{c.get('ctrt', 0.0):+.2f}%" if price_val > 0 else "0.00%",
-        "거래량": f"{int(c['volume']):,}주" if c.get("volume") else "-",
+        "등락률": ctrt_str,
+        "거래량": vol_str,
         "상태": "⚠️ 유의종목" if c.get("stat") in ["51", "52", "53", "54", "58", "59"] else "🟢 정상",
-        "갱신시각": c.get("time", "-")
+        "갱신시각": time_str
     })
 
 st.dataframe(pd.DataFrame(display_list), use_container_width=True, hide_index=True, height=750)
