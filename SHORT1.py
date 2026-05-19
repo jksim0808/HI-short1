@@ -13,7 +13,7 @@ APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
 # =================================================================
-# 🏦 한국투자증권 실전 API 전용 정밀 통신 엔진
+# 🏦 한국투자증권 실전 API 전용 정밀 통신 엔진 (철갑 방어 가동)
 # =================================================================
 class KoreaInvestmentAPI:
     def __init__(self):
@@ -23,8 +23,8 @@ class KoreaInvestmentAPI:
         
         self.session = requests.Session()
         retry_strategy = Retry(
-            total=2,
-            backoff_factor=0.2,
+            total=3,
+            backoff_factor=0.3,
             status_forcelist=[500, 502, 503, 504]
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -40,19 +40,24 @@ class KoreaInvestmentAPI:
             headers = {"content-type": "application/json", "User-Agent": "Mozilla/5.0"}
             data = {"grant_type": "client_credentials", "appkey": self.app_key, "appsecret": self.app_secret}
             
-            response = self.session.post(url, headers=headers, json=data, timeout=4.0)
-            res_json = response.json()
+            response = self.session.post(url, headers=headers, json=data, timeout=5.0)
             
-            if response.status_code == 200:
-                token = res_json.get("access_token")
-                if token:
-                    st.session_state.api_access_token = token
-                    st.session_state.token_expire_time = datetime.now() + timedelta(hours=12)
-                    return token
-            st.session_state.last_api_error = f"🚨 [토큰 발급 실패] 한투 응답: {res_json}"
+            # JSON 파싱 전에 텍스트 안전성 검사
+            if not response.text or response.status_code != 200:
+                st.session_state.last_api_error = f"🚨 [토큰 서버 거절] HTTP 상태코드: {response.status_code} | 응답내용: {response.text[:100]}"
+                return None
+                
+            res_json = response.json()
+            token = res_json.get("access_token")
+            if token:
+                st.session_state.api_access_token = token
+                st.session_state.token_expire_time = datetime.now() + timedelta(hours=12)
+                return token
+            
+            st.session_state.last_api_error = f"🚨 [토큰 키 거부] 응답메시지: {res_json}"
             return None
         except Exception as e:
-            st.session_state.last_api_error = f"💥 [토큰 오류] {str(e)}"
+            st.session_state.last_api_error = f"💥 [토큰 시스템 예외] {str(e)}"
             return None
 
     def get_realtime_price(self, ticker):
@@ -73,41 +78,45 @@ class KoreaInvestmentAPI:
         params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": str(ticker).strip()}
         
         try:
-            response = self.session.get(url, headers=headers, params=params, timeout=3.0)
-            res_json = response.json()
+            response = self.session.get(url, headers=headers, params=params, timeout=4.0)
             
-            if response.status_code == 200:
-                if res_json.get("rt_cd", "0") != "0":
-                    st.session_state.last_api_error = f"🚨 [조회 거절] 종목({ticker}): {res_json.get('msg1')}"
-                    return None
-                    
-                res_data = res_json.get("output", {})
-                if res_data and res_data.get("stck_prpr"):
-                    # 음수 기호(-)나 부호 제거 후 순수 숫자 파싱
-                    current_price = float(str(res_data.get("stck_prpr")).strip().replace("-", "").replace("+", ""))
-                    high_price = float(str(res_data.get("stck_hgpr", current_price)).strip().replace("-", "").replace("+", ""))
-                    low_price = float(str(res_data.get("stck_lwpr", current_price)).strip().replace("-", "").replace("+", ""))
-                    
-                    # 거래량이 0이거나 비어있어도 에러내지 않고 최소 1.0 주입 (안전장치)
-                    raw_vol = str(res_data.get("accl_tr_vol", "1.0")).strip()
-                    volume = float(raw_vol) if raw_vol and raw_vol != "0" else 1.0
-                    
-                    return {
-                        "Close": current_price, "High": high_price, "Low": low_price,
-                        "Volume": volume, "Source": "한투 실시간 시세"
-                    }
-            st.session_state.last_api_error = f"🚨 [HTTP 에러] {response.status_code}"
+            # 한투가 빈 문자열을 주거나 튕겨냈을 때 터지지 않게 방어
+            if not response.text:
+                st.session_state.last_api_error = f"🚨 [시세 빈 응답] 한투가 데이터를 주지 않고 연결을 끊었습니다. 키값(공백오타)을 재확인하세요."
+                return None
+                
+            if response.status_code != 200:
+                st.session_state.last_api_error = f"🚨 [시세 서버 거부] HTTP {response.status_code} | 응답: {response.text[:100]}"
+                return None
+                
+            res_json = response.json()
+            if res_json.get("rt_cd", "0") != "0":
+                st.session_state.last_api_error = f"🚨 [조회 거절] 종목({ticker}): {res_json.get('msg1')}"
+                return None
+                
+            res_data = res_json.get("output", {})
+            if res_data and res_data.get("stck_prpr"):
+                current_price = float(str(res_data.get("stck_prpr")).strip().replace("-", "").replace("+", ""))
+                high_price = float(str(res_data.get("stck_hgpr", current_price)).strip().replace("-", "").replace("+", ""))
+                low_price = float(str(res_data.get("stck_lwpr", current_price)).strip().replace("-", "").replace("+", ""))
+                
+                raw_vol = str(res_data.get("accl_tr_vol", "1.0")).strip()
+                volume = float(raw_vol) if raw_vol and raw_vol != "0" else 1.0
+                
+                return {
+                    "Close": current_price, "High": high_price, "Low": low_price,
+                    "Volume": volume, "Source": "한투 실시간 시세"
+                }
             return None
         except Exception as e:
-            st.session_state.last_api_error = f"💥 [시세 통신 오류] {str(e)}"
+            st.session_state.last_api_error = f"💥 [시세 파싱 예외] {str(e)}"
             return None
 
 # =================================================================
 # 🏷️ 종목 마스터 데이터 관리
 # =================================================================
 STOCK_NAME_MAP = {
-    "005930": "삼성전자", "000660": "SK하이닉스", "005380": "현대차", "000270": "기아",
-    "035420": "NAVER", "035720": "카카오", "068270": "셀트리온", "373220": "LG에너지솔루션"
+    "005930": "삼성전자", "000660": "SK하이닉스", "005380": "현대차", "000270": "기아"
 }
 
 def get_stock_name(ticker):
@@ -167,7 +176,7 @@ st.caption(f"💡 현재 화면 데이터 시점: {datetime.now().strftime('%H:%
 if st.session_state.last_api_error:
     st.error(st.session_state.last_api_error)
 else:
-    st.info("🟢 통신 상태: 정상 (조회 버튼을 누르면 실시간 가격을 원샷 요청합니다)")
+    st.info("🟢 통신 상태: 대기 중 (버튼을 누르면 정밀 진단을 시작합니다)")
 
 col_btn1, col_btn2 = st.columns(2)
 click_refresh = col_btn1.button("🔥 [클릭] 한투 실시간 시세 조회/갱신", type="primary", use_container_width=True)
@@ -178,7 +187,7 @@ if col_btn2.button("🧹 데이터 초기화 (캐시 청소)", use_container_wid
     st.rerun()
 
 if not APP_KEY or not APP_SECRET:
-    st.warning("⚠️ Streamlit Secrets 금고에 키값이 보이지 않습니다.")
+    st.warning("⚠️ Streamlit Secrets 금고에 키값이 비어있습니다. Secrets를 꼭 리셋해주세요.")
 
 # =================================================================
 # ⚙️ 데이터 프로세싱 엔진 코어
@@ -191,7 +200,6 @@ if click_refresh:
     for ticker in st.session_state.custom_stock_pool:
         live_tick = api.get_realtime_price(ticker)
         
-        # 거래량 방어막 통과 후 정상 시세가 잡힌 경우에만 주입
         if live_tick and live_tick["Close"] > 0:
             if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
                 init_rows = []
@@ -207,7 +215,7 @@ if click_refresh:
             st.session_state.multi_market_data[ticker] = pd.concat([st.session_state.multi_market_data[ticker], new_df])
             st.session_state.multi_market_data[ticker] = st.session_state.multi_market_data[ticker].loc[~st.session_state.multi_market_data[ticker].index.duplicated(keep='last')].tail(15)
 
-# 화면 출력용 데이터 취합
+# 화면 출력부 데이터 생성
 summary_rows = []
 for ticker in st.session_state.custom_stock_pool:
     if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
@@ -218,7 +226,7 @@ for ticker in st.session_state.custom_stock_pool:
             init_times.append(pd.to_datetime(time_str))
             init_rows.append({"Close": 50000.0, "High": 50000.0, "Low": 50000.0, "Volume": 0.0})
         df_frame = pd.DataFrame(init_rows, index=init_times)
-        data_source_text = "🛑 대기중 (위 버튼을 누르세요)"
+        data_source_text = "🛑 대기중"
     else:
         df_frame = st.session_state.multi_market_data[ticker].copy()
         data_source_text = "한투 실시간 시세"
@@ -240,15 +248,9 @@ for ticker in st.session_state.custom_stock_pool:
 
 st.markdown("---")
 
-# =================================================================
-# 🖥️ 결과 출력 대시보드
-# =================================================================
 if summary_rows:
     summary_df = pd.DataFrame(summary_rows).sort_values(by=['신호가중치', '실시간거래대금'], ascending=[True, False]).reset_index(drop=True)
     
-    if click_refresh and not summary_df[summary_df["신호가중치"] == 0].empty:
-        st.audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg") 
-
     for index, row in summary_df.iterrows():
         sig = row["현재 타이밍 신호"]
         rank_idx = index + 1
@@ -262,17 +264,8 @@ if summary_rows:
         )
         
         if sig == "🔥 매수 타점!!":
-            with st.container():
-                st.error(f"🎯 **{sig}**\n\n{card_header}")
-                st.markdown(card_body)
-                st.markdown("---")
+            with st.container(): st.error(f"🎯 **{sig}**\n\n{card_header}\n\n{card_body}"); st.markdown("---")
         elif sig == "🚨 익절/청산":
-            with st.container():
-                st.warning(f"🚨 **{sig}**\n\n{card_header}")
-                st.markdown(card_body)
-                st.markdown("---")
+            with st.container(): st.warning(f"🚨 **{sig}**\n\n{card_header}\n\n{card_body}"); st.markdown("---")
         else:
-            with st.container():
-                st.success(f"🍏 **{sig}**\n\n{card_header}")
-                st.markdown(card_body)
-                st.markdown("---")
+            with st.container(): st.success(f"🍏 **{sig}**\n\n{card_header}\n\n{card_body}"); st.markdown("---")
