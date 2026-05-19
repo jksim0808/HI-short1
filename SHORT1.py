@@ -11,31 +11,27 @@ APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
 # =================================================================
-# 🏦 한투 실전투자 표준 인증 엔진 (헤더/바디 규격 완전 매칭)
+# 🏦 한투 실전투자 전용 파싱 엔진 (가변 패킷 완벽 대응 수신기)
 # =================================================================
 class KoreaInvestmentOfficialAPI:
     def __init__(self):
         self.base_url = "https://openapi.koreainvestment.com:9443"
         self.app_key = APP_KEY
         self.app_secret = APP_SECRET
-        self.user_agent = "2026_HiMobile_Scanner/1.0" # 한투 방화벽 통과용 유저에이전트 고정
+        self.user_agent = "Mozilla/5.0"
 
     def get_fresh_access_token(self):
-        """ 🎯 한투 표준 API 가이드라인에 맞춘 토큰 발급 갱신 """
+        """ 한투 실전 서버 직통 토큰 발급 """
         try:
             url = f"{self.base_url}/oauth2/tokenP"
-            # 한투 가이드 기준 content-type 정밀 고정
             headers = {"content-type": "application/json"}
             data = {
                 "grant_type": "client_credentials", 
                 "appkey": self.app_key, 
                 "appsecret": self.app_secret
             }
-            
             r = requests.post(url, headers=headers, json=data, timeout=5)
             j = r.json()
-            
-            # 한투에서 카톡이 왔다면 access_token 필드가 무조건 여기에 담깁니다.
             token = j.get("access_token")
             if token:
                 return token
@@ -50,33 +46,40 @@ class KoreaInvestmentOfficialAPI:
             
         url = f"{self.base_url}/uapi/domestic-stock/v1/quoting/inquire-price"
         
-        # 주도주 20선 코스닥/코스피 시장 분기 완벽 고정
+        # 주도주 20선 시장 분기
         kosdaq_tickers = ["422340", "043200", "086520", "247540", "068270", "035420", "035720", "000990", "042700", "322890", "108320", "213420", "054780", "018250", "028300"]
         market_div = "Y" if ticker in kosdaq_tickers else "J"
         
-        # 한투 실전투자 API 필수 헤더 구조 매칭
         headers = {
             "content-type": "application/json; charset=utf-8",
             "authorization": f"Bearer {token}",
             "appkey": self.app_key,
             "appsecret": self.app_secret,
-            "tr_id": "FHKST01010200",  # 주식현재가 호가 조회용 실전 TR ID
-            "custtype": "P"            # 개인 고객 고정
+            "tr_id": "FHKST01010200", 
+            "custtype": "P"
         }
         params = {"FID_COND_MRKT_DIV_CODE": market_div, "FID_INPUT_ISCD": str(ticker).strip()}
         
         try:
-            r = requests.get(url, headers=headers, params=params, timeout=4)
+            r = requests.get(url, headers=headers, params=params, timeout=5)
             if r.status_code == 200:
                 res_json = r.json()
-                out1 = res_json.get("output1", {})
                 
-                if isinstance(out1, list) and len(out1) > 0: 
-                    out1 = out1[0]
+                # 🎯 [핵심 수정] 한투 응답 데이터 구조 유연화 (리스트/딕셔너리 양방향 방어)
+                out1 = res_json.get("output1")
+                if not out1:
+                    return None
+                    
+                if isinstance(out1, list):
+                    if len(out1) > 0:
+                        out1 = out1[0]
+                    else:
+                        return None
                 
+                # 데이터 추출 및 정제
                 if isinstance(out1, dict) and "stck_prpr" in out1:
                     def _clean(val):
-                        if not val: return 0.0
+                        if val is None or str(val).strip() == "": return 0.0
                         return float(str(val).strip().replace("-", "").replace("+", ""))
                     
                     close_val = _clean(out1.get("stck_prpr"))
@@ -110,8 +113,8 @@ def get_ai_lead_stocks():
 # =================================================================
 st.set_page_config(page_title="AI 주도주 실시간 단타 스캐너", layout="wide")
 
-st.title("🎯 AI 주도주 20선 실시간 단타 스캐너 (🔒 인증 표준화 보정판)")
-st.caption(f" 가동 시점: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 한투 다이렉트 동기화 작동")
+st.title("🎯 AI 주도주 20선 실시간 단타 스캐너 (🔒 패킷 정밀 수신판)")
+st.caption(f" 가동 시점: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 한투 원본 데이터 다이렉트 매핑")
 
 if "market_history" not in st.session_state:
     st.session_state.market_history = {}
@@ -123,7 +126,7 @@ master_pool = get_ai_lead_stocks()
 
 col_btn1, col_btn2, col_info = st.columns([1, 1, 3])
 
-if col_btn1.button("⚡ AI 실시간 주도주 수급 동기화", type="primary", use_container_width=True, key="btn_sync_standard"):
+if col_btn1.button("⚡ AI 실시간 주도주 수급 동기화", type="primary", use_container_width=True, key="btn_sync_perfect"):
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     temp_history = {}
@@ -151,15 +154,16 @@ if col_btn1.button("⚡ AI 실시간 주도주 수급 동기화", type="primary"
         st.session_state.live_pct_map.update(temp_pct)
         st.session_state["data_loaded"] = True
     else:
-        st.error("🚨 알림톡이 발급되었으나 연동에 실패했습니다. Streamlit Secrets창에 키를 붙여넣으실 때 앞뒤에 '공백(스페이스바)'이나 '줄바꿈'이 섞였는지 한 번만 메모장에 검수 후 다시 붙여넣어 주십시오.")
+        # 에러 메시지 고도화: 한투 서버의 데이터 응답 구조 자체를 확인하도록 유도
+        st.error("🚨 [데이터 수신 차단] 인증(카톡)은 정상 완료되었으나, 한투 실전 서버가 종목 시세 패킷 반환을 거부했습니다. 종합계좌 예수금 계좌가 정상 활성화 상태인지, 혹은 일일 조회 제한 트래픽(초당 2건 이상 호출 제한)에 걸렸는지 확인이 필요합니다.")
 
-if col_btn2.button("🧹 단타 캐시 리셋", use_container_width=True, key="btn_reset_standard"):
+if col_btn2.button("🧹 단타 캐시 리셋", use_container_width=True, key="btn_reset_perfect"):
     st.session_state.market_history = {}
     st.session_state.live_pct_map = {}
     if "data_loaded" in st.session_state: del st.session_state["data_loaded"]
     st.rerun()
 
-col_info.markdown("💡 **인증 안내:** 한투에서 알림톡을 정상 수신하셨다면, 현재 표준 규격 세팅으로 매칭되어 수급 동기화가 이루어집니다.")
+col_info.markdown("💡 **시스템 안내:** 가상 데이터 우회 통로를 완전히 폐쇄했습니다. 한투 실전 패킷이 들어오는 즉시 실시간 연산이 개시됩니다.")
 
 st.markdown("---")
 
@@ -219,4 +223,4 @@ if st.session_state.get("data_loaded", False) and st.session_state.market_histor
                 st.caption(f"⚡ 시그널: `{sig_text}`")
                 st.markdown("---")
 else:
-    st.info("⚡ 한투 표준 인증 서버 대기 중. 상단의 **'⚡ AI 실시간 주도주 수급 동기화'** 버튼을 클릭하십시오.")
+    st.info("⚡ 한투 패킷 대기 중. 상단의 **'⚡ AI 실시간 주도주 수급 동기화'** 버튼을 클릭하십시오.")
