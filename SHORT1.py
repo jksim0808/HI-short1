@@ -1,4 +1,35 @@
-# 30번 라인 근처 토큰 발급 함수 수정
+import streamlit as st
+import pandas as pd
+import asyncio
+import httpx
+from datetime import datetime
+
+# =================================================================
+# 🔑 Streamlit Secrets 안전망 결합
+# =================================================================
+APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
+APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
+
+# 백업 마스터 풀 (10,000원 이상 우량주 위주)
+BACKUP_MASTER_POOL = [
+    ("005930", "삼성전자"), ("000660", "SK하이닉스"), ("005380", "현대차"), ("000270", "기아"),
+    ("068270", "셀트리온"), ("035420", "NAVER"), ("005490", "POSCO홀딩스"), ("051910", "LG화학"),
+    ("006400", "삼성SDI"), ("035720", "카카오"), ("439960", "코스모로보틱스"), ("000670", "영풍"),
+    ("012450", "한화에어로스페이스"), ("009830", "한화솔루션"), ("034020", "두산에너빌리티"), ("010140", "삼성중공업"),
+    ("015760", "한국전력"), ("004020", "현대제철"), ("011780", "금호석유"), ("010950", "S-Oil")
+]
+
+# 로컬 메모리 캐시 및 실행 플래그 초기화
+if "price_cache" not in st.session_state:
+    st.session_state.price_cache = {}
+if "active_pool" not in st.session_state:
+    st.session_state.active_pool = {}
+if "token_err_msg" not in st.session_state:
+    st.session_state.token_err_msg = ""
+
+# =================================================================
+# 🚀 1. 한투 API 인증 토큰 발급 (비동기)
+# =================================================================
 async def fetch_token_async(client):
     url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
     data = {"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}
@@ -8,17 +39,173 @@ async def fetch_token_async(client):
         if "access_token" in res_json:
             return res_json.get("access_token")
         else:
-            # 한투가 거절한 진짜 이유를 세션에 임시 저장
-            st.session_state["token_err_msg"] = res_json.get("error_description", "앱키 또는 시크릿 키 불일치")
+            st.session_state.token_err_msg = res_json.get("error_description", "앱키/시크릿 키 불일치")
             return None
     except Exception as e:
-        st.session_state["token_err_msg"] = f"한투 서버 통신 시간초과 (네트워크 지연): {str(e)}"
+        st.session_state.token_err_msg = f"네트워크 지연/연결 실패: {str(e)}"
         return None
 
-# 105번 라인 근처 update_all_prices_safe 함수 내 토큰 검증부 수정
+# =================================================================
+# 📊 2. 거래대금 상위 수급 풀 가져오기 (현재가 10,000원 이상 필터)
+# =================================================================
+async def fetch_volume_rank_async(client, token):
+    url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
+    headers = {
+        "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
+        "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01710000", "custtype": "P"
+    }
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20171",
+        "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_SORT_CLS_CODE": "1"
+    }
+    try:
+        r = await client.get(url, headers=headers, params=params, timeout=4.0)
+        if r.status_code == 200:
+            output = r.json().get("output", [])
+            pool = []
+            for item in output:
+                ticker = str(item.get("mksc_shrn_iscd", "")).strip()[-6:]
+                name = str(item.get("hts_kor_isnm", item.get("data_name", ""))).strip()
+                current_price = float(item.get("stck_prpr", 0))
+                
+                if ticker.isdigit() and name and name != "None":
+                    if current_price < 10000: continue
+                    if any(k in name for k in ["우", "스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER"]): continue
+                    pool.append((ticker, name))
+            return pool
+    except:
+        pass
+    return BACKUP_MASTER_POOL
+
+# =================================================================
+# ⚡ 3. 마이크로 슬롯 타임 분사 엔진
+# =================================================================
+async def fetch_single_price_throttled(client, token, ticker, name, delay):
+    await asyncio.sleep(delay)
+    url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price"
+    headers = {
+        "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
+        "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01010000"
+    }
+    params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker}
+    
+    try:
+        r = await client.get(url, headers=headers, params=params, timeout=2.0)
+        if r.status_code == 200:
+            output = r.json().get("output", {})
+            return {
+                "ticker": ticker, "name": name,
+                "price": float(output.get("stck_prpr", 0)),
+                "ctrt": float(output.get("prdy_ctrt", 0.0)),
+                "volume": float(output.get("acml_vol", 0)),
+                "timestamp": datetime.now().strftime("%H:%M:%S")
+            }
+    except:
+        pass
+    
+    old = st.session_state.price_cache.get(ticker, {"price": 0, "ctrt": 0.0, "volume": 0, "timestamp": "-"})
+    return {
+        "ticker": ticker, "name": name,
+        "price": old.get("price", 0), "ctrt": old.get("ctrt", 0.0), "volume": old.get("volume", 0),
+        "timestamp": old.get("timestamp", "-")
+    }
+
+async def update_all_prices_safe():
+    limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
+    async with httpx.AsyncClient(limits=limits) as client:
         token = await fetch_token_async(client)
         if not token:
-            err_detail = st.session_state.get("token_err_msg", "알 수 없는 인증 오류")
-            st.error(f"❌ 한투 Access Token 발급 실패 원인: [ {err_detail} ]")
-            st.warning("💡 조치 방법: Streamlit Secrets에 입력된 APP_KEY와 SECRET 앞뒤에 공백이나 줄바꿈이 없는지 꼭 확인해 주세요.")
-            return
+            return False
+
+        raw_pool = await fetch_volume_rank_async(client, token)
+        temp_pool = {}
+        for ticker, name in raw_pool:
+            if len(temp_pool) >= 20: break
+            temp_pool[ticker] = name
+        
+        if len(temp_pool) < 20:
+            for ticker, name in BACKUP_MASTER_POOL:
+                if len(temp_pool) >= 20: break
+                if ticker not in temp_pool: temp_pool[ticker] = name
+                
+        st.session_state.active_pool = temp_pool
+
+        tasks = []
+        for idx, (ticker, name) in enumerate(st.session_state.active_pool.items()):
+            delay = idx * 0.05  
+            tasks.append(fetch_single_price_throttled(client, token, ticker, name, delay))
+        
+        results = await asyncio.gather(*tasks)
+        
+        for res in results:
+            st.session_state.price_cache[res["ticker"]] = {
+                "price": res["price"], "ctrt": res["ctrt"], "volume": res["volume"],
+                "timestamp": res["timestamp"]
+            }
+        return True
+
+# 🎯 프리징을 완벽하게 방지하는 독립 이벤트 루프 브릿지
+def force_run_async(coro):
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+# =================================================================
+# 🖥️ 4. UI 대시보드 출력부
+# =================================================================
+st.set_page_config(page_title="만 원 이상 주도주 스캐너", layout="wide")
+st.title("🎯 AI 장중 거래대금 20선 실시간 스캐너 (10,000원↑)")
+
+# 💡 [핵심] 최초 가동이거나 캐시가 비어있으면 수동 버튼 안 눌러도 '자동 강제 시동'
+if not st.session_state.price_cache:
+    with st.spinner("🚀 엔진 초기 시동 및 주도주 덤프 중..."):
+        success = force_run_async(update_all_prices_safe())
+        if not success:
+            st.error(f"❌ 한투 토큰 발급 실패: [ {st.session_state.token_err_msg} ]")
+            st.warning("💡 Secrets에 입력된 APP_KEY와 SECRET 값에 공백이나 엔터가 없는지 확인해 주세요.")
+
+# 제어 영역
+col_ctrl, _ = st.columns([3, 5])
+if col_ctrl.button("🔄 실시간 시세 고속 동기화", type="primary", use_container_width=True):
+    with st.spinner("⚡ 데이터 동기화 중..."):
+        success = force_run_async(update_all_prices_safe())
+        if not success:
+            st.error(f"❌ 토큰 발급 실패: [ {st.session_state.token_err_msg} ]")
+        st.rerun()
+
+# 화면 노출 데이터 프레임 빌드
+display_list = []
+active_items = list(st.session_state.active_pool.items())
+
+for ticker, name in active_items:
+    cache = st.session_state.price_cache.get(ticker, {"price": 0, "ctrt": 0.0, "volume": 0, "timestamp": "-"})
+    growth = cache["ctrt"]
+    
+    if growth >= 10.0: signal = "🔥 상한가 도전 / 초급등 수급"
+    elif growth > 4.0: signal = "⚡ 거래량 폭발 돌파 (매수 가시권)"
+    elif growth > 0.5: signal = "🟢 수급 우상향 추종"
+    else: signal = "⚪ 숨고르기 및 관망"
+    
+    display_list.append({
+        "종목코드": ticker, "종목명": name,
+        "현재가": f"{int(cache['price']):,} 원" if cache['price'] > 0 else "데이터 수신중",
+        "당일 등락률": f"{growth:+.2f}%",
+        "누적 거래량": f"{int(cache['volume']):,} 주",
+        "최근 체결 시각": cache["timestamp"],
+        "엔진 상태": "🟢 정상 운영중",
+        "단타 수급 시그널": signal
+    })
+
+if display_list:
+    df_display = pd.DataFrame(display_list)
+    df_display["sort_val"] = df_display["당일 등락률"].str.replace("%", "").astype(float)
+    df_display = df_display.sort_values(by="sort_val", ascending=False).reset_index(drop=True)
+    df_display = df_display.drop(columns=["sort_val"])
+    
+    df_display.insert(0, "순위", [f"{i+1}위" for i in range(len(df_display))])
+    st.dataframe(df_display, use_container_width=True, hide_index=True)
+else:
+    st.info("데이터가 비어있습니다. 위 동기화 버튼을 눌러주세요.")
