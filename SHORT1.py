@@ -5,9 +5,8 @@ import httpx
 from datetime import datetime
 
 # =================================================================
-# ⚙️ [최우선 배치] Streamlit 페이지 설정 (에러 방지의 핵심)
+# ⚙️ [최우선 배치] Streamlit 페이지 설정
 # =================================================================
-# 모든 UI 관련 함수(columns, title 등)보다 무조건 이 코드가 맨 위에 와야 에러가 안 납니다.
 st.set_page_config(page_title="주도주 스캐너", layout="wide")
 
 # =================================================================
@@ -76,17 +75,18 @@ async def run_scanner():
             if res: st.session_state.price_cache[res["ticker"]] = res
 
 # =================================================================
-# 🖥️ 화면 출력부 (순서 정밀 교정)
+# 🖥️ 화면 출력부 (컨테이너 안전망 전면 결합)
 # =================================================================
 st.title("🎯 10,000원 이상 우량 주도주 실시간 스캐너")
 
-# columns 튕김을 방지하기 위해 정수형 변수로 확실히 대입
-col_ctrl, col_info = st.columns(2)
-
-with col_ctrl:
-    if st.button("🔄 실시간 시세 갱신", type="primary", use_container_width=True):
-        asyncio.run(run_scanner())
-        st.rerun()
+# 🛡️ 에러가 발생하던 상단 제어부 레이아웃을 하나의 컨테이너 박스로 격리
+with st.container():
+    col_ctrl, col_info = st.columns(2)
+    
+    with col_ctrl:
+        if st.button("🔄 실시간 시세 갱신", type="primary", use_container_width=True):
+            asyncio.run(run_scanner())
+            st.rerun()
 
 # 데이터 수합 및 정렬용 데이터 프레임 빌드
 display_list = []
@@ -110,6 +110,7 @@ if display_list:
     # 가독성을 위한 순위 칼럼 수동 주입
     df_display.insert(0, "순위", [f"{i+1}위" for i in range(len(df_display))])
     
+    # 정보 텍스트 역시 컨테이너 안전망 내부 매핑
     with col_info:
         st.markdown(f"##### 📊 현재 수급 포착: **{len(df_display)}개 종목** 모니터링 중")
     
