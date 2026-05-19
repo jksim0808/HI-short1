@@ -17,7 +17,7 @@ APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
 # =================================================================
-# 🏦 한투 실전투자 전용 정밀 통신 엔진 (5중 파싱 안전장치 장착)
+# 🏦 한투 실전투자 전용 정밀 통신 엔진 (output1 구조 대응 패치)
 # =================================================================
 class KoreaInvestmentOfficialAPI:
     def __init__(self):
@@ -26,7 +26,7 @@ class KoreaInvestmentOfficialAPI:
         self.app_secret = APP_SECRET
         self.session = requests.Session()
         
-        # 한투 방화벽 프리패스용 크롬 브라우저 식별자
+        # 한투 방화벽 통과용 표준 크롬 브라우저 식별자
         self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         
         retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
@@ -89,37 +89,29 @@ class KoreaInvestmentOfficialAPI:
             res_json = r.json()
             
             # -------------------------------------------------------------
-            # 🛠️ [5중 데이터 알맹이 파괴 추출 장치]
+            # 🎯 [수정 핵심] 실전망 멀티 패킷(output1) 타격 장치
             # -------------------------------------------------------------
-            out = res_json.get("output")
+            # 한투 실전 응답에 output1이 우선 존재하므로, 이를 최우선 타깃으로 지정합니다.
+            out = res_json.get("output1") or res_json.get("output")
             
-            # 안전장치 1: 만약 output이 통째로 리스트에 싸여서 내려온다면 첫 번째 요소를 강제로 탈출시킴
             if isinstance(out, list) and len(out) > 0:
                 out = out[0]
-            
-            # 안전장치 2: 만약 output이 없고 전체 루트 레벨(res_json)에 시세가 박혀있을 경우 유연하게 확장
-            if not out or not isinstance(out, dict):
-                out = res_json if isinstance(res_json, dict) else {}
                 
-            # 안전장치 3: 한투 실전 및 구형/신형 서버가 사용하는 현재가 모든 핵심 필드 후보군 교차 추적
-            close_val = out.get("stck_prpr") or out.get("stck_prc") or out.get("prpr") or out.get("last")
-            high_val = out.get("stck_hgpr") or out.get("hgpr") or out.get("high") or close_val
-            low_val = out.get("stck_lwpr") or out.get("lwpr") or out.get("low") or close_val
-            vol_val = out.get("accl_tr_vol") or out.get("tr_vol") or out.get("volume") or out.get("accl_tr_vol_or_0", 0)
+            if not out or not isinstance(out, dict):
+                # 최악의 경우 output2나 루트 레벨 백업 수색
+                out = res_json.get("output2") or res_json if isinstance(res_json, dict) else {}
+                
+            # 시세 필드 매핑 데이터 교차 추출
+            close_val = out.get("stck_prpr") or out.get("stck_prc") or out.get("prpr")
+            high_val = out.get("stck_hgpr") or out.get("hgpr") or close_val
+            low_val = out.get("stck_lwpr") or out.get("lwpr") or close_val
+            vol_val = out.get("accl_tr_vol") or out.get("tr_vol") or out.get("volume")
 
-            # 안전장치 4: 걸러낸 값이 여전히 안 잡혔을 때 차선책으로 전체 텍스트 수색 시도
+            # 데이터가 유실되었을 경우 최종 방어선
             if not close_val:
-                for key, value in out.items():
-                    if 'prpr' in key or 'prc' in key:
-                        close_val = value
-                        break
-            
-            # 최종 예외 처리: 만약 데이터 필드를 아무리 뒤져도 값을 못 찾았다면 디버깅을 위해 에러 로그 박스 표기
-            if not close_val:
-                st.warning(f"⚠️ [매핑 오류 가이드] '정상처리' 메시지는 받았으나 데이터의 위치가 특이합니다.\n\n한투 응답 필드 형태: `{list(out.keys())[:5]}`")
+                st.warning(f"⚠️ [구조 변경 타깃 오류] output1 내부 필드가 매핑되지 않았습니다.\n\n내부 필드샘플: `{list(out.keys())[:5]}`")
                 return None
                 
-            # 부호 제거 및 데이터 플로트(float) 규격 변환 완료
             def _clean(val):
                 if val is None: return 0.0
                 return float(str(val).strip().replace("-", "").replace("+", ""))
@@ -156,11 +148,11 @@ def process_quant_signals(df):
     return df
 
 # =================================================================
-# 🖥️ UI 및 모니터링 화면 구성 (중복 버튼 방지 완전 클린화)
+# 🖥️ UI 및 모니터링 화면 구성
 # =================================================================
 st.set_page_config(page_title="실전 수급 스캐너 (개선판)", layout="centered")
 st.title("🏹 실전 수급 스캐너 (개선판)")
-st.caption(f"💡 현재 화면 데이터 시점: {datetime.now().strftime('%H:%M:%S')} | 📡 가동모드: 5중 안전 매핑 가동중")
+st.caption(f"💡 현재 화면 데이터 시점: {datetime.now().strftime('%H:%M:%S')} | 📡 가동모드: 실전망 멀티 패킷(output1) 타격 해제")
 
 # 종목 풀 설정
 if "stock_pool" not in st.session_state:
@@ -172,7 +164,7 @@ if "market_history" not in st.session_state:
 api = KoreaInvestmentOfficialAPI()
 col_left, col_right = st.columns(2)
 
-if col_left.button("🔥 한투 실시간 시세 동기화", type="primary", use_container_width=True, key="btn_sync_live_final"):
+if col_left.button("🔥 한투 실시간 시세 동기화", type="primary", use_container_width=True, key="btn_sync_live_output1"):
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     for ticker in st.session_state.stock_pool:
@@ -187,7 +179,7 @@ if col_left.button("🔥 한투 실시간 시세 동기화", type="primary", use
             else:
                 st.session_state.market_history[ticker] = pd.concat([st.session_state.market_history[ticker], new_row]).tail(30)
 
-if col_right.button("🧹 캐시 데이터 초기화", use_container_width=True, key="btn_clear_cache_final"):
+if col_right.button("🧹 캐시 데이터 초기화", use_container_width=True, key="btn_clear_cache_output1"):
     st.session_state.market_history = {}
     if "api_access_token" in st.session_state:
         del st.session_state["api_access_token"]
