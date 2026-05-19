@@ -24,7 +24,7 @@ if "engine_cache" not in st.session_state: st.session_state.engine_cache = {}
 if "last_pool" not in st.session_state: st.session_state.last_pool = BACKUP_MASTER_POOL
 
 # =====================================================================
-# 🏹 무결점 동기식 한투 API 커넥터 엔진 (requests Session 기반)
+# 🏹 무결점 동기식 한투 API 커넥터 엔진 (20개 타이트매칭 보정)
 # =====================================================================
 class HantuSyncEngine:
     def __init__(self):
@@ -52,16 +52,31 @@ class HantuSyncEngine:
             if r.status_code == 200:
                 output = r.json().get("output", [])
                 pool = []
+                
+                # 🎯 [핵심 보정] 저가주 탈락을 대비해 상위 수십 개 데이터를 끝까지 탐색하며 만 원 이상 종목 20개를 완벽히 채웁니다.
                 for item in output:
                     ticker = str(item.get("mksc_shrn_iscd", "")).strip()[-6:]
                     name = str(item.get("hts_kor_isnm", item.get("data_name", ""))).strip()
                     try: price = float(item.get("stck_prpr", 0))
                     except: price = 0
                     
+                    # 10,000원 이상 우량주 검증 필터
                     if ticker.isdigit() and name and name != "None" and price >= 10000:
                         if any(k in name for k in ["우", "스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER"]): continue
                         pool.append((ticker, name))
-                return pool if pool else BACKUP_MASTER_POOL
+                    
+                    # 정확히 20개가 채워지면 탐색을 즉시 종료
+                    if len(pool) >= 20: 
+                        break
+                        
+                # 만약 장중 필터 통과 종목이 20개 미만일 경우 백업 마스터 종목으로 부족한 자리를 채워 20개 라인을 강제 수호합니다.
+                if len(pool) < 20:
+                    for b_ticker, b_name in BACKUP_MASTER_POOL:
+                        if len(pool) >= 20: break
+                        if not any(b_ticker == p[0] for p in pool):
+                            pool.append((b_ticker, b_name))
+                            
+                return pool
         except: pass
         return BACKUP_MASTER_POOL
 
@@ -88,7 +103,6 @@ class HantuSyncEngine:
                     }
         except: pass
 
-        # 🎯 [메모리 복원 시스템] 통신이 튀더라도 기존 성공 데이터를 복원해 '대기중'이나 '누락'을 화면에서 지워버립니다.
         old = st.session_state.engine_cache.get(ticker, {})
         return {
             "ticker": ticker, "name": name,
@@ -114,11 +128,11 @@ if st.button("🔄 즉시 마켓 시세 스캔 및 갱신", type="primary", use_
         if not token:
             st.session_state["token_error"] = "토큰 발급 실패 (비밀키 권한 재점검 요망)"
         else:
-            # 1. 수급 주도주 20선 갱신
+            # 1. 수급 주도주 완벽히 20개 확보
             dynamic_pool = engine.fetch_market_pool(token)
             st.session_state.last_pool = dynamic_pool
             
-            # 2. 🎯 칼같은 0.12초 동기식 타임 슬롯 분사 (한투 초당 제한 TPS 100% 우회 정공법)
+            # 2. 20개 종목 순차 분사 조회
             for idx, (t, n) in enumerate(dynamic_pool[:20]):
                 res = engine.fetch_single_price(token, t, n)
                 st.session_state.engine_cache[t] = res
@@ -156,4 +170,9 @@ for t, n in st.session_state.last_pool[:20]:
         "갱신시각": time_str
     })
 
-st.dataframe(pd.DataFrame(display_list), use_container_width=True, hide_index=True, height=750)
+# 가독성을 높이기 위해 수동 순위 배정 및 데이터프레임 노출
+df_final = pd.DataFrame(display_list)
+if not df_final.empty:
+    df_final.insert(0, "순위", [f"{i+1}위" for i in range(len(df_final))])
+
+st.dataframe(df_final, use_container_width=True, hide_index=True, height=750)
