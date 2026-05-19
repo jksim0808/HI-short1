@@ -195,7 +195,7 @@ if st.session_state.market_history:
                 st.markdown(f"**현재가:** {int(latest['Close'])}원 | **수급선(VWAP):** {int(latest['VWAP'])}원 | **RSI:** {int(latest['RSI'])}")
                 st.markdown("---")
 else:
-    st.info("상단 '🔥 한투 실시간 시세 동기화' 버튼을 누르시면 실전망 데이터를 호출하여 퀀트 스캔을 시작합니다.")import streamlit as st
+    st.info("상단 '🔥 한투 실시간 시세 동기화' 버튼을 누르시면 실전망 데이터를 호출하여 퀀트 스캔을 시작합니다.")
 import pandas as pd
 import numpy as np
 import requests
