@@ -215,8 +215,7 @@ if st.session_state.get("data_loaded", False) and st.session_state.market_histor
                 st.caption(f"⚡ 시그널: `{sig_text}`")
                 st.markdown("---")
 else:
-    st.info("⚡ 대시보드가 준비되었습니다. 상단의 **'⚡ AI 실시간 주도주 수급 동기화'** 버튼을 누르시면 즉시 상위 20개 종목 데이터가 하단에 강제로 꽂힙니다.")import streamlit as st
-import pandas as pd
+    st.info("⚡ 대시보드가 준비되었습니다. 상단의 **'⚡ AI 실시간 주도주 수급 동기화'** 버튼을 누르시면 즉시 상위 20개 종목 데이터가 하단에 강제로 꽂힙니다.")import pandas as pd
 import numpy as np
 import requests
 import random
