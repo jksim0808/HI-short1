@@ -16,13 +16,16 @@ if "engine_cache" not in st.session_state: st.session_state.engine_cache = {}
 if "last_pool" not in st.session_state: st.session_state.last_pool = []
 if "hantu_token" not in st.session_state: st.session_state.hantu_token = None
 if "token_expires_at" not in st.session_state: st.session_state.token_expires_at = None
+if "debug_msg" not in st.session_state: st.session_state.debug_msg = "🔌 통신 대기 중..."
 
 # =====================================================================
-# 🖥️ 상단 고정: 프로그램 특징 / 종목 분류 방법 / 실전 사용법 (장중 변화 추가)
+# 🖥️ 상단 고정: 프로그램 특징 / 종목 분류 방법 / 실전 사용법
 # =====================================================================
 st.title("🎯 AI 실시간 주도주 검색기 (실전 단타 전용 Pro)")
 
-# 3단 분할 레이아웃으로 가이드라인 시각화
+# 현재 시스템의 통신 상태를 상단에 직관적으로 표시
+st.info(f"📡 **시스템 실시간 통신 진단 리포트:** {st.session_state.debug_msg}")
+
 col1, col2, col3 = st.columns(3)
 
 with col1:
@@ -56,30 +59,41 @@ with col3:
         """
     )
 
-st.write("---") # 시각적 구분을 위한 구분선
+st.write("---") 
 
 # =====================================================================
-# 🏹 오피셜 순위 출력 한투 API 커넥터 엔진 (거래대금 순위 개조 버전)
+# 🏹 오피셜 순위 출력 한투 API 커넥터 엔진 (디버깅 진단 강화)
 # =====================================================================
 class HantuSyncEngine:
     def __init__(self):
         self.session = requests.Session()
         
     def get_token(self):
+        # API Key 입력 자체 검증
+        if not APP_KEY or not APP_SECRET:
+            st.session_state.debug_msg = "❌ 에러: Streamlit Secrets에 한투 APP_KEY 또는 APP_SECRET이 비어있거나 설정되지 않았습니다."
+            return None
+
         now = datetime.now(tz=timezone.utc)
         if st.session_state.hantu_token and st.session_state.token_expires_at and st.session_state.token_expires_at > now:
             return st.session_state.hantu_token
 
         url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
         try:
-            r = self.session.post(url, json={"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}, timeout=3.0)
+            r = self.session.post(url, json={"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}, timeout=5.0)
             if r.status_code == 200:
                 data = r.json()
                 token = data.get("access_token")
-                st.session_state.hantu_token = token
-                st.session_state.token_expires_at = datetime.now(tz=timezone.utc) + timedelta(hours=5)
-                return token
-        except: pass
+                if token:
+                    st.session_state.hantu_token = token
+                    st.session_state.token_expires_at = datetime.now(tz=timezone.utc) + timedelta(hours=5)
+                    return token
+                else:
+                    st.session_state.debug_msg = f"❌ 에러: 한투 응답 데이터에 토큰이 없음 -> {r.text}"
+            else:
+                st.session_state.debug_msg = f"❌ 에러: 토큰 발급 HTTP 실패 ({r.status_code}) -> APP_KEY/SECRET을 재확인하세요."
+        except Exception as e:
+            st.session_state.debug_msg = f"❌ 에러: 한투 인증 서버와 연결 불통 (네트워크/방화벽 확인) -> {str(e)}"
         return None
 
     def fetch_market_pool(self, token):
@@ -96,28 +110,38 @@ class HantuSyncEngine:
             "FID_COND_SCR_DIV_CODE": "20171",
             "FID_INPUT_ISCD": "0000", 
             "FID_DIV_CLS_CODE": "0", 
-            "FID_SORT_CLS_CODE": "3" # 거래대금순 정렬 적용
+            "FID_SORT_CLS_CODE": "3" # 거래대금순 정렬
         }
         try:
-            r = self.session.get(url_vol, headers=headers_vol, params=params_vol, timeout=4.0)
+            r = self.session.get(url_vol, headers=headers_vol, params=params_vol, timeout=5.0)
             if r.status_code == 200:
-                output = r.json().get("output", [])
+                res_data = r.json()
+                output = res_data.get("output", [])
+                
+                # API 수신 자체 성공 여부 체크
+                if res_data.get("rt_cd") != "0":
+                    st.session_state.debug_msg = f"❌ 한투 API 에러 반환: {res_data.get('msg1')}"
+                    return pool
+                    
+                if not output:
+                    st.session_state.debug_msg = "⚠️ 한투에서 거래대금 순위 원본 데이터를 비어있게 반환했습니다. (장 개시 전이거나 서버 지연)"
+                
                 for item in output:
                     ticker = str(item.get("mksc_shrn_iscd", "")).strip()[-6:]
                     name = str(item.get("hts_kor_isnm", item.get("data_name", ""))).strip()
                     try: price = float(item.get("stck_prpr", 0))
                     except: price = 0
                     
-                    # 🛠️ [조건 완화] 최소 가격 제한을 10,000원에서 2,000원으로 낮춤 (알짜 테마주 소싱 허용)
                     if ticker.isdigit() and name and name != "None" and price >= 2000:
                         if any(k in name for k in ["스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF", "SOL", "ACE", "HANARO"]): 
                             continue
-                        
                         if name.endswith("우") or any(name.endswith(f"우{suffix}") for suffix in ["B", "C", " 우선주", "1", "2", "3"]):
                             continue
-                            
                         pool.append((ticker, name))
-        except: pass
+            else:
+                st.session_state.debug_msg = f"❌ 에러: 순위 데이터 호출 HTTP 실패 ({r.status_code})"
+        except Exception as e:
+            st.session_state.debug_msg = f"❌ 에러: 순위 데이터 통신 실패 -> {str(e)}"
         return pool
 
     def fetch_single_price(self, token, ticker, name):
@@ -147,9 +171,23 @@ class HantuSyncEngine:
 # =====================================================================
 # 🖥️ 하단 데이터 제어 및 렌더링 파트
 # =====================================================================
-if st.button("🔄 시장 실시간 주도주 새로 불러오기", type="primary", use_container_width=True):
+# 🛠️ [세션 초기화 버튼 추가] 통신이 완전히 꼬였을 때를 위한 강력한 초기화 수단
+cc1, cc2 = st.columns([4, 1])
+with cc1:
+    btn_fetch = st.button("🔄 시장 실시간 주도주 새로 불러오기", type="primary", use_container_width=True)
+with cc2:
+    btn_clear = st.button("⚠️ 토큰/세션 강제 초기화", type="secondary", use_container_width=True)
+
+if btn_clear:
+    st.session_state.hantu_token = None
+    st.session_state.token_expires_at = None
+    st.session_state.engine_cache = {}
+    st.session_state.last_pool = []
+    st.session_state.debug_msg = "♻️ 토큰 캐시가 강제 삭제되었습니다. 다시 '새로 불러오기'를 눌러주세요."
+    st.rerun()
+
+if btn_fetch:
     if "token_error" in st.session_state: del st.session_state["token_error"]
-    
     st.session_state.engine_cache = {}
     st.session_state.last_pool = []
     
@@ -158,16 +196,21 @@ if st.button("🔄 시장 실시간 주도주 새로 불러오기", type="primar
         token = engine.get_token()
         
         if not token:
-            st.session_state["token_error"] = "토큰 발급 실패 (잠시 후 다시 시도해 주세요)"
+            st.session_state["token_error"] = "토큰 발급 실패 (상단 통신 진단 리포트를 확인하세요)"
         else:
             dynamic_pool = engine.fetch_market_pool(token)
             st.session_state.last_pool = dynamic_pool
             
-            for idx, (t, n) in enumerate(dynamic_pool):
-                res = engine.fetch_single_price(token, t, n)
-                if res:
-                    st.session_state.engine_cache[t] = res
-                time.sleep(0.12) 
+            if dynamic_pool:
+                st.session_state.debug_msg = f"🟢 통신 성공: 총 {len(dynamic_pool)}개의 기초 종목 풀을 확보하여 실시간 가격 연산 중..."
+                for idx, (t, n) in enumerate(dynamic_pool):
+                    res = engine.fetch_single_price(token, t, n)
+                    if res:
+                        st.session_state.engine_cache[t] = res
+                    time.sleep(0.12) # 모의투자/실전 API 초당 제한 회피용 안정 버퍼
+            else:
+                if "❌" not in st.session_state.debug_msg:
+                    st.session_state.debug_msg = "⚠️ 서버 통신은 성공했으나 필터링 조건에 맞는 종목이 수집되지 않았습니다."
             st.rerun()
 
 if "token_error" in st.session_state:
