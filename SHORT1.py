@@ -12,7 +12,6 @@ st.set_page_config(page_title="AI 실시간 주도주 스캐너 Pro", layout="wi
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
-# 🎯 과거 캐시 락 수정을 위해 버튼 클릭 시마다 완전히 초기화되도록 구조 변경
 if "engine_cache" not in st.session_state: st.session_state.engine_cache = {}
 if "last_pool" not in st.session_state: st.session_state.last_pool = []
 if "hantu_token" not in st.session_state: st.session_state.hantu_token = None
@@ -51,7 +50,7 @@ class HantuSyncEngine:
         }
         params_vol = {
             "FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20171",
-            "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_SORT_CLS_CODE": "2" # 거래대금 정렬
+            "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_SORT_CLS_CODE": "2"
         }
         try:
             r = self.session.get(url_vol, headers=headers_vol, params=params_vol, timeout=4.0)
@@ -91,22 +90,20 @@ class HantuSyncEngine:
                         "time": datetime.now().strftime("%H:%M:%S")
                     }
         except: pass
-        # 🎯 과거 캐시 복원 로직을 완전히 제거하여 실패 시 빈 값 처리
         return None
 
 # =====================================================================
 # 🖥️ UI 대시보드 및 동기 처리 제어 파트
 # =====================================================================
-st.title("🎯 AI 실시간 주도주 검색기 (투명한 시장 연동 버전)")
+st.title("🎯 AI 실시간 주도주 검색기 (정밀 단타 조건 필터링)")
 
 if st.button("🔄 시장 실시간 주도주 새로 불러오기", type="primary", use_container_width=True):
     if "token_error" in st.session_state: del st.session_state["token_error"]
     
-    # 🎯 [핵심] 새로고침을 누르는 순간 과거의 캐시 메모리를 강제로 싹 다 밀어버립니다 (3개 종목 유령 차단)
     st.session_state.engine_cache = {}
     st.session_state.last_pool = []
     
-    with st.spinner("과거 메모리를 청소하고 현재 마켓 상태 원본만 정밀 분석 중..."):
+    with st.spinner("현재 마켓 수급을 분석하여 실시간 단타 대상주 선별 중..."):
         engine = HantuSyncEngine()
         token = engine.get_token()
         
@@ -132,7 +129,7 @@ display_list = []
 if st.session_state.last_pool:
     for t, n in st.session_state.last_pool:
         c = st.session_state.engine_cache.get(t)
-        if not c: continue # 시세 가져오기 실패한 낙오 종목은 표에 아예 올리지 않음
+        if not c: continue
         
         price_val = c.get("price", -1)
         ctrt_val = c.get("ctrt", 0.0)
@@ -140,29 +137,25 @@ if st.session_state.last_pool:
         
         is_restricted = stat_val in ["51", "52", "53", "54", "58", "59"]
         
-        if price_val <= 0:
-            rank_grade = "⚙️ 분석대기"
-        elif is_restricted:
-            rank_grade = "❌ 매매제외 (위험주)"
-        elif ctrt_val <= 0.0:
-            rank_grade = "❌ 매매제외 (하락/보합)"
-        elif ctrt_val >= 25.0:
+        # 🎯 [핵심 보정] 단타 매매 가치가 없는 보합/하락/후발주(삼성전자 등)는 표에 추가하지 않고 완전히 Pass 시킵니다.
+        if price_val <= 0 or is_restricted or ctrt_val < 5.0:
+            continue
+            
+        if ctrt_val >= 25.0:
             rank_grade = "⚡ B급 (과열/추격금지)"
         elif ctrt_val >= 10.0 and ctrt_val < 25.0:
             rank_grade = "🔥 A급 (최우선 대장주)"
-        elif ctrt_val >= 5.0 and ctrt_val < 10.0:
-            rank_grade = "⚡ B급 (후발/방망이짧게)"
         else:
-            rank_grade = "📋 일반 관망"
+            rank_grade = "⚡ B급 (후발/방망이짧게)"
 
         display_list.append({
             "종목코드": t,
             "종목명": c.get("name", n),
             "AI 매매등급": rank_grade,
-            "현재가": f"{int(price_val):,}원" if price_val > 0 else "-",
+            "현재가": f"{int(price_val):,}원",
             "등락률": f"{ctrt_val:+.2f}%",
             "거래량": f"{int(c['volume']):,}주",
-            "상태": "⚠️ 유의종목" if is_restricted else "🟢 정상",
+            "상태": "🟢 정상",
             "수집시각": c.get("time", "-")
         })
 
@@ -171,5 +164,5 @@ if not df_final.empty:
     df_final.insert(0, "시장투자순위", [f"{i+1}위" for i in range(len(df_final))])
     st.dataframe(df_final, use_container_width=True, hide_index=True, height=750)
 else:
-    # 🎯 과거 3개 종목 프리징 현상을 깨버리고, 현재 살 게 없으면 정직하게 빈 화면 알림을 띄웁니다.
-    st.info("📊 현재 한투 오피셜 실시간 마켓에 포착된 만 원 이상 주도주가 존재하지 않습니다. 시장 대기자금을 안전하게 보존하십시오.")
+    # 🎯 대표님의 원칙대로 조건에 맞지 않는 하락/보합주는 싹 비우고 안전 대기 안내를 띄웁니다.
+    st.info("📊 현재 당일 주도주 조건(+5% 이상 상승 우량주)에 부합하는 매매 대상 종목이 없습니다. 무리한 진입을 피하고 대기자금을 보존하십시오.")
