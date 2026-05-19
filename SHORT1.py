@@ -12,7 +12,7 @@ APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
 # =================================================================
-# 🏦 한투 실전투자 전용 초정밀 파싱 엔진 (현재가 필드 고정)
+# 🏦 한투 실전투자 전용 초정밀 파싱 엔진 (시장 분류 코드 자동 스위칭)
 # =================================================================
 class KoreaInvestmentOfficialAPI:
     def __init__(self):
@@ -38,12 +38,20 @@ class KoreaInvestmentOfficialAPI:
                 st.session_state.token_expire_time = datetime.now() + timedelta(seconds=70000)
             return token
         except:
-            return "MOCK_TOKEN_FALLBACK"
+            return None
 
     def get_realtime_price(self, ticker):
         token = self.get_access_token()
-        
+        if not token:
+            return None
+            
         url = f"{self.base_url}/uapi/domestic-stock/v1/quoting/inquire-price"
+        
+        # 🎯 [정밀 보정 1] 종목별 시장 분류 코드 분기 처리 (코스닥 및 주요 주도주 예외 방지)
+        # 한미반도체(042700), 파두(043200), 에이직랜드(422340) 등 코스닥 및 특정 섹터 자동 대응
+        kosdaq_tickers = ["422340", "043200", "086520", "247540", "068270", "035420", "035720", "000990", "042700", "322890", "108320", "213420", "054780", "018250", "028300"]
+        market_div = "Y" if ticker in kosdaq_tickers else "J"
+        
         headers = {
             "content-type": "application/json; charset=utf-8",
             "authorization": f"Bearer {token}",
@@ -52,21 +60,22 @@ class KoreaInvestmentOfficialAPI:
             "tr_id": "FHKST01010200", 
             "custtype": "P"
         }
-        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": str(ticker).strip()}
+        params = {"FID_COND_MRKT_DIV_CODE": market_div, "FID_INPUT_ISCD": str(ticker).strip()}
         
         try:
-            r = requests.get(url, headers=headers, params=params, timeout=3)
+            r = requests.get(url, headers=headers, params=params, timeout=4)
             if r.status_code == 200:
                 res_json = r.json()
-                
-                # 실시간 현재가와 등락률은 무조건 output1에서만 추출하여 매핑 충돌 방지
                 out1 = res_json.get("output1", {})
+                
                 if isinstance(out1, list) and len(out1) > 0: 
                     out1 = out1[0]
                 
+                # 🎯 [정밀 보정 2] 한투 실전 데이터 원천 파싱 및 클렌징 수강
                 if isinstance(out1, dict) and "stck_prpr" in out1:
                     def _clean(val):
-                        return float(str(val).strip().replace("-", "").replace("+", "")) if val else 0.0
+                        if not val: return 0.0
+                        return float(str(val).strip().replace("-", "").replace("+", ""))
                     
                     close_val = _clean(out1.get("stck_prpr"))
                     
@@ -80,17 +89,7 @@ class KoreaInvestmentOfficialAPI:
                         }
         except:
             pass
-            
-        # 통신 지연 혹은 장외 시간 대비용 백업 로직 (실제 값 유실 시에만 작동)
-        mock_bases = {"005930": 72500, "000660": 186200, "422340": 55300, "043200": 18100, "042700": 142000}
-        base = mock_bases.get(ticker, 45000)
-        return {
-            "Close": float(base),
-            "High": float(base * 1.01),
-            "Low": float(base * 0.99),
-            "Volume": float(random.randint(500000, 1500000)),
-            "PrdyCtrt": float(random.uniform(0.5, 3.5))
-        }
+        return None
 
 # =================================================================
 # 🧠 AI 당일 주도주 대상 종목 (정확히 20개 매핑)
@@ -109,8 +108,8 @@ def get_ai_lead_stocks():
 # =================================================================
 st.set_page_config(page_title="AI 주도주 실시간 단타 스캐너", layout="wide")
 
-st.title("🎯 AI 주도주 20선 실시간 단타 스캐너 (⚡ 현재가 정밀 보정판)")
-st.caption(f" 가동 시점: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 한투 실전 호가 패킷 동기화 중")
+st.title("🎯 AI 주도주 20선 실시간 단타 스캐너 (⚡ 실시간 완전 동기화판)")
+st.caption(f" 가동 시점: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 한투 실전 다이렉트 패킷 수신 중")
 
 if "market_history" not in st.session_state:
     st.session_state.market_history = {}
@@ -122,32 +121,52 @@ master_pool = get_ai_lead_stocks()
 
 col_btn1, col_btn2, col_info = st.columns([1, 1, 3])
 
-if col_btn1.button("⚡ AI 실시간 주도주 수급 동기화", type="primary", use_container_width=True, key="btn_sync_real_final"):
+if col_btn1.button("⚡ AI 실시간 주도주 수급 동기화", type="primary", use_container_width=True, key="btn_sync_real_absolute"):
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # 임시 저장소 확보
+    temp_history = {}
+    temp_pct = {}
+    success_count = 0
     
     for ticker, name in master_pool.items():
         data = api.get_realtime_price(ticker)
         
-        new_row = pd.DataFrame([{
-            "Close": float(data["Close"]), "High": float(data["High"]), "Low": float(data["Low"]), "Volume": float(data["Volume"])
-        }], index=[pd.to_datetime(current_time)])
-        
-        st.session_state.live_pct_map[ticker] = float(data["PrdyCtrt"])
-        
-        if ticker not in st.session_state.market_history:
-            st.session_state.market_history[ticker] = new_row
-        else:
-            st.session_state.market_history[ticker] = pd.concat([st.session_state.market_history[ticker], new_row]).tail(20)
+        # 실전 데이터가 정상적으로 수신된 경우에만 바인딩
+        if data and data["Close"] > 0:
+            success_count += 1
+            new_row = pd.DataFrame([{
+                "Close": float(data["Close"]), "High": float(data["High"]), "Low": float(data["Low"]), "Volume": float(data["Volume"])
+            }], index=[pd.to_datetime(current_time)])
             
-    st.session_state["data_loaded"] = True
+            temp_pct[ticker] = float(data["PrdyCtrt"])
+            
+            if ticker not in st.session_state.market_history:
+                temp_history[ticker] = new_row
+            else:
+                temp_history[ticker] = pd.concat([st.session_state.market_history[ticker], new_row]).tail(20)
+        else:
+            # 실패 시 기존 세션 유지 (화면 멈춤 방지)
+            if ticker in st.session_state.market_history:
+                temp_history[ticker] = st.session_state.market_history[ticker]
+            if ticker in st.session_state.live_pct_map:
+                temp_pct[ticker] = st.session_state.live_pct_map[ticker]
 
-if col_btn2.button("🧹 단타 캐시 리셋", use_container_width=True, key="btn_reset_real_final"):
+    # 세션 상태에 최종 덮어쓰기
+    if success_count > 0:
+        st.session_state.market_history.update(temp_history)
+        st.session_state.live_pct_map.update(temp_pct)
+        st.session_state["data_loaded"] = True
+    else:
+        st.error("🚨 한투 API 실시간 데이터 응답에 실패했습니다. Secrets 설정(AppKey/Secret) 및 장중 시간을 확인해 주십시오.")
+
+if col_btn2.button("🧹 단타 캐시 리셋", use_container_width=True, key="btn_reset_real_absolute"):
     st.session_state.market_history = {}
     st.session_state.live_pct_map = {}
     if "data_loaded" in st.session_state: del st.session_state["data_loaded"]
     st.rerun()
 
-col_info.markdown("💡 **알림:** 장중(09:00 ~ 15:30)에 동기화 버튼을 누르시면 HTS 창과 1원 단위까지 완벽하게 일치하는 실시간 호가 정보로 연동됩니다.")
+col_info.markdown("💡 **알림:** 현재 시장 코드 자동 분기 엔진이 작동 중입니다. 버튼 클릭 시 실시간 체결 데이터가 원본 그대로 화면에 투사됩니다.")
 
 st.markdown("---")
 
@@ -162,7 +181,6 @@ if st.session_state.get("data_loaded", False) and st.session_state.market_histor
         latest = df.iloc[-1]
         
         growth_rate = float(st.session_state.live_pct_map.get(ticker, 0.0))
-        volume_score = float(latest["Volume"] * latest["Close"])
         vwap_val = float(df["Close"].mean())
         
         ranking_list.append({
@@ -170,14 +188,13 @@ if st.session_state.get("data_loaded", False) and st.session_state.market_histor
             "name": str(master_pool.get(ticker)),
             "price": int(latest["Close"]),
             "vwap": int(vwap_val),
-            "growth": growth_rate,
-            "v_score": volume_score
+            "growth": growth_rate
         })
     
     ranking_df = pd.DataFrame(ranking_list)
     
     if not ranking_df.empty:
-        # 실시간 당일 등락률 순 정렬
+        # HTS 등락률 순 정렬 완벽 매칭
         ranking_df = ranking_df.sort_values(by="growth", ascending=False).reset_index(drop=True)
         
         st.subheader("🔥 AI 선정 실시간 단타 주도주 순위 Top 20")
@@ -204,10 +221,10 @@ if st.session_state.get("data_loaded", False) and st.session_state.market_histor
             target_col = cols[idx % 4]
             with target_col:
                 sig_text = "🔥 매수추천" if row.growth > 3.0 else "🟢 관망유지"
-                st.markdown(f"### 🟢 {row.name}")
+                st.markdown(f"### {row.name}")
                 st.markdown(f"**코드:** `{row.code}` | **등락:** `{row.growth:+.2f}%`")
                 st.metric(label="실시간 현재가", value=f"{row.price:,}원", delta=f"평균차: {int(row.price - row.vwap):+}원")
                 st.caption(f"⚡ 시그널: `{sig_text}`")
                 st.markdown("---")
 else:
-    st.info("⚡ 대시보드가 준비되었습니다. 상단의 **'⚡ AI 실시간 주도주 수급 동기화'** 버튼을 누르시면 정밀 튜닝된 실시간 데이터가 즉시 바인딩됩니다.")
+    st.info("⚡ 대시보드가 수급 신호를 대기 중입니다. 상단의 **'⚡ AI 실시간 주도주 수급 동기화'** 버튼을 누르시면 정밀 파싱된 원본 호가가 투사됩니다.")
