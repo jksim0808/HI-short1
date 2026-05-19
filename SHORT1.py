@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 # =====================================================================
 # ⚙️ [최우선] Streamlit 설정 및 세션 초기화
 # =====================================================================
-st.set_page_config(page_title="장 초반 1시간 골든아워 스캐너 Pro (KST)", layout="wide")
+st.set_page_config(page_title="오전 집중 주도주 스캐너 Pro (KST)", layout="wide")
 
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
@@ -18,34 +18,38 @@ if "hantu_token" not in st.session_state: st.session_state.hantu_token = None
 if "token_expires_at" not in st.session_state: st.session_state.token_expires_at = None
 
 # =====================================================================
-# ⏳ 09:00 ~ 10:00 [한국 표준시(KST) 강제 바인딩] 타임 제어 연산
+# ⏳ 08:00 ~ 12:00 [한국 표준시(KST) 적용] 타임 제어 연산
 # =====================================================================
-# 🛠️ [대한민국 표준시 설정] 서버 위치와 상관없이 무조건 한국 시간으로 강제 동기화
 KST = timezone(timedelta(hours=9))
 now_kst = datetime.now(tz=KST)
 current_time_str = now_kst.strftime("%H:%M:%S")
 
-# 한국 표준시 기준 상태 체크 (9시~10시 여부)
-is_golden_hour = (now_kst.hour == 9)
-is_before_market = (now_kst.hour < 9)
-is_after_market = (now_kst.hour >= 10)
+# 한국 표준시 기준 상태 체크 (8시 ~ 12시 여부)
+is_active_hour = (8 <= now_kst.hour < 12)
+is_golden_hour = (9 <= now_kst.hour < 12) # 실제 장중
+is_before_market = (now_kst.hour < 8)
+is_after_market = (now_kst.hour >= 12)
 
 # 카운트다운 및 타임 배너 제어
 if is_golden_hour:
+    remaining_hours = 11 - now_kst.hour
     remaining_min = 60 - now_kst.minute
-    time_status_msg = f"🔥 [한국 표준시 기준 골든아워 운영 중] 오전 10시 마감까지 **{remaining_min}분** 남았습니다. 칼손절/칼익절 필수! (현재 서울: {current_time_str})"
+    time_status_msg = f"🔥 [오전 주도주 모드 가동 중] 12:00 마감까지 **{remaining_hours}시간 {remaining_min}분** 남았습니다. 기계적 대응 필수! (현재 서울: {current_time_str})"
     status_color = "inverse"
+elif now_kst.hour == 8:
+    time_status_msg = f"💤 [장 개시 전 세팅 상태] 한국 표준시 9시 정각부터 실시간 주도주 소싱이 활성화됩니다. (현재 서울: {current_time_str})"
+    status_color = "info"
 elif is_before_market:
-    time_status_msg = f"💤 [장 개시 전] 한국 표준시 오전 9시 정각부터 10시까지만 작동하는 모드입니다. (현재 서울: {current_time_str})"
+    time_status_msg = f"💤 [운영 전] 본 프로그램은 한국 시간 오전 8시부터 낮 12시까지만 작동합니다. (현재 서울: {current_time_str})"
     status_color = "info"
 else:
-    time_status_msg = f"🛑 [운영 종료] 대한민국 표준시 오전 10시 골든아워가 마감되었습니다. 현재 시간 이후 진입은 무조건 뇌동매매입니다. (현재 서울: {current_time_str})"
+    time_status_msg = f"🛑 [오전 운영 마감] 낮 12시가 경과하여 오전 스캐너가 마감되었습니다. 점심시간 이후 뇌동매매를 금지합니다. (현재 서울: {current_time_str})"
     status_color = "error"
 
 # =====================================================================
 # 🖥️ 상단 고정 가이드라인
 # =====================================================================
-st.title("⚡ AI 9시~10시 단타 골든아워 검색기 (Pro - KST 전용)")
+st.title("⚡ AI 08시~12시 오전 집중 단타 스캐너 (Pro - KST)")
 
 if status_color == "inverse":
     st.success(time_status_msg)
@@ -56,38 +60,39 @@ else:
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.markdown("### 🏹 1시간 초집중 가변 수급 로직")
+    st.markdown("### 🏹 오전 시간대별 동적 수급 로직")
     st.markdown(
         """
-        * **09:00 ~ 09:10**: 당일 거래대금 **5억 이상** 즉시 포착 (초동 대장주)
-        * **09:10 ~ 09:30**: 당일 거래대금 **30억 이상** 락업 (주도주 압축)
-        * **09:30 ~ 10:00**: 당일 거래대금 **50억 이상** 검증 (진짜 대장주)
+        * **08:00 ~ 09:00**: 장전 대기 모드 (데이터 소싱 제한)
+        * **09:00 ~ 09:10**: 당일 거래대금 **5억 이상** (초동 시초가 대장주 포착)
+        * **09:10 ~ 09:30**: 당일 거래대금 **30억 이상** (수급 중심주 압축)
+        * **09:30 ~ 12:00**: 당일 거래대금 **50억 이상** (오전 최종 주도주 검증)
         """
     )
 with col2:
-    st.markdown("### 📊 골든아워 AI 등급 체계")
+    st.markdown("### 📊 AI 단타 매매 등급")
     st.markdown(
         """
-        * **🔥 A급 (골든 대장주)**: 등락률 **+10% ~ +25% 미만** (돌파/눌림목 최적 타깃)
-        * **⚡ B급 (후발/단기수급)**: 등락률 **+1% ~ +10% 미만** (짧은 스캘핑 타깃)
-        * **❌ 매매금지/과열**: 등락률 **+25% 이상** (상한가 털기 리스크 최고조 부근)
-        * **❌ 10시 이후**: 10시 정각 통과 시 **모든 종목 자동 매매 금지 전환**
+        * **🔥 A급 (오전 대장주)**: 등락률 **+10% ~ +25% 미만** (돌파/눌림목 핵심 타깃)
+        * **⚡ B급 (후발/단기수급)**: 등락률 **+1% ~ +10% 미만** (짧은 방망이 스캘핑 타깃)
+        * **❌ 과열/추격 금지**: 등락률 **+25% 이상** (상한가 풀림 및 고점 투매 리스크 고조)
+        * **❌ 12시 이후**: 12시 정각 통과 시 **모든 데이터 셧다운 및 매매 금지**
         """
     )
 with col3:
-    st.markdown("### 🚨 실전 매매 행동 수칙")
+    st.markdown("### 🚨 실전 매매 수칙")
     st.markdown(
         """
-        1. **9시 5분 전후 첫 진입**: 거래대금 5억 필터로 가장 빠르게 쏘아 올리는 1등주에 편승합니다.
-        2. **9시 40분 이후 보수적 접근**: 거래대금 50억 족쇄가 채워지며, 힘이 빠지는 종목은 리스트에서 자동 소멸합니다.
-        3. **10시 정각 올 청산**: 수익이든 손실이든 한국 시간 10시 정각에는 무조건 컴퓨터를 끄는 것이 상책입니다.
+        1. **08:00 대기**: 장 시작 전 hantu 토큰 세션을 매끄럽게 초기화해두는 시간입니다.
+        2. **09:40 이후 옥석 가리기**: 50억 족쇄가 채워진 이후에도 리스트 상위에 랭크된 종목 위주로 거래합니다.
+        3. **12:00 기계적 청산**: 점심시간 직전 거래량이 동결되면서 발생하는 흘러내리기(투매)에 당하지 말고 전량 청산합니다.
         """
     )
 
 st.write("---")
 
 # =====================================================================
-# 🏹 골든아워 전용 거래대금 엔진 (KST 제어 탑재)
+# 🏹 오전 집중형 거래대금 엔진 (8시-12시 타임 제어 탑재)
 # =====================================================================
 class HantuGoldenEngine:
     def __init__(self):
@@ -113,8 +118,8 @@ class HantuGoldenEngine:
 
     def fetch_market_pool(self, token):
         pool = []
-        # 한국 표준시로 10시가 넘어가면 API 호출 자체를 락인(Lock-in)하여 불필요한 트래픽 해제
-        if is_after_market:
+        # 8시 전이거나 12시 이후이면 한투 API 호출을 원천 차단
+        if not is_active_hour or now_kst.hour == 8:
             return pool
 
         url_amt = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/trade-amount-range"
@@ -130,14 +135,14 @@ class HantuGoldenEngine:
             if r.status_code == 200:
                 output = r.json().get("output", [])
                 
-                # 🛠️ 한국 표준시(KST) 타임 윈도우별 자금 커트라인 정교화
+                # 🛠️ 한국 표준시(KST) 시간대별 동적 커트라인 연산
                 now_check = datetime.now(tz=KST)
                 if now_check.hour == 9 and now_check.minute <= 10:
                     min_amt = 500000000       # 09:00 ~ 09:10 -> 최소 5억 원
                 elif now_check.hour == 9 and now_check.minute <= 30:
                     min_amt = 3000000000      # 09:10 ~ 09:30 -> 최소 30억 원
                 else:
-                    min_amt = 5000000000      # 09:30 ~ 10:00 -> 최소 50억 원
+                    min_amt = 5000000000      # 09:30 ~ 12:00 -> 최소 50억 원
                 
                 for item in output:
                     ticker = str(item.get("mksc_shrn_iscd", "")).strip()[-6:]
@@ -151,12 +156,12 @@ class HantuGoldenEngine:
                     except: ctrt = 0.0
                     
                     if ticker.isdigit() and name and name != "None":
-                        # 금융 노이즈(스팩, 리츠, 우선주, 인버스, 레버리지) 및 동전주 필터링
+                        # 금융 노이즈(스팩, 리츠, 우선주, 인버스, 레버리지) 및 동전주 차단
                         if any(k in name for k in ["스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF"]): continue
                         if name.endswith("우") or any(name.endswith(f"우{s}") for s in ["B", "C", " 우선주", "1", "2", "3"]): continue
                         if price < 2000: continue
                         
-                        # KST 가변 거래대금 및 최소 등락률(+1% 이상) 적용
+                        # 가변 거래대금 및 수급 조건(+1% 이상) 적용
                         if amt_val < min_amt or ctrt < 1.0: continue
                         
                         pool.append((ticker, name, amt_val, price, ctrt))
@@ -168,7 +173,9 @@ class HantuGoldenEngine:
 # =====================================================================
 cc1, cc2 = st.columns([4, 1])
 with cc1:
-    btn_fetch = st.button("🔄 실시간 골든아워 주도주 새로고침 (한국시간 09~10시만 작동)", type="primary", use_container_width=True, disabled=is_after_market)
+    # 8시 모드이거나 12시 마감 이후면 새로고침 버튼 작동 잠금
+    btn_disabled = (not is_golden_hour)
+    btn_fetch = st.button("🔄 실시간 오전 주도주 새로고침 (한국시간 09~12시 작동)", type="primary", use_container_width=True, disabled=btn_disabled)
 with cc2:
     btn_clear = st.button("⚠️ 시스템 세션 초기화", type="secondary", use_container_width=True)
 
@@ -180,7 +187,7 @@ if btn_clear:
 
 if btn_fetch and is_golden_hour:
     st.session_state.last_pool = []
-    with st.spinner("한국 표준시 기준 실시간 자금 필터링 연산 중..."):
+    with st.spinner("오전 수급 실시간 가변 필터링 분석 중..."):
         engine = HantuGoldenEngine()
         token = engine.get_token()
         if token:
@@ -195,16 +202,16 @@ display_list = []
 if st.session_state.last_pool:
     for t, n, amt, price, ctrt in st.session_state.last_pool:
         
-        # 장중에 앱을 띄워놓고 보다가 한국 시간 10시를 통과하면 실시간으로 화면 정지 및 매매 금지 표기
+        # 장중에 앱을 켜놓고 모니터링하다가 한국 시간 12시 정각을 넘어가면 등급과 지침을 강제로 동결/차단 표기
         if is_after_market:
-            rank_grade = "❌ 장 마감 (진입 금지 / 전량 청산)"
+            rank_grade = "❌ 오전 장 마감 (진입 금지 / 전량 청산)"
             status_tag = "🔴 운영 종료"
         else:
             if ctrt >= 25.0:
                 rank_grade = "❌ 과열 (추격 금지 구간)"
                 status_tag = "🟡 관망"
             elif ctrt >= 10.0 and ctrt < 25.0:
-                rank_grade = "🔥 A급 (골든 대장주)"
+                rank_grade = "🔥 A급 (오전 대장주)"
                 status_tag = "🟢 주 타깃"
             else:
                 rank_grade = "⚡ B급 (후발/단기수급)"
@@ -222,14 +229,16 @@ if st.session_state.last_pool:
 
 df_final = pd.DataFrame(display_list)
 
-# 출력부 제어 (모두 한국 표준시 기준)
+# 출력부 제어 (한국 표준시 기준 안내 배너)
 if is_after_market:
-    st.error(f"🛑 한국 표준시 오전 10시가 경과하여 당일 스캐너가 자동 셧다운되었습니다. (현재 서울: {current_time_str})")
+    st.error(f"🛑 한국 표준시 오전 집중 운영 시간(08:00~12:00)이 마감되었습니다. (현재 서울: {current_time_str})")
+elif now_kst.hour == 8:
+    st.info(f"📊 장 개시 전 동시호가 분석 대기 중입니다. 9시 정각부터 실시간 대장주 추적이 활성화됩니다. (현재 서울: {current_time_str})")
 elif is_before_market:
-    st.info(f"📊 장 개시 전입니다. 한국 시간 아침 9시 정각부터 실시간 대장주 추적을 시작합니다. (현재 서울: {current_time_str})")
+    st.info(f"📊 시스템 가동 전입니다. 한국 시간 오전 8시부터 대기 모드가 시작됩니다. (현재 서울: {current_time_str})")
 else:
     if not df_final.empty:
-        df_final.insert(0, "골든아워 수급순위", [f"{i+1}위" for i in range(len(df_final))])
+        df_final.insert(0, "오전 수급순위", [f"{i+1}위" for i in range(len(df_final))])
         st.dataframe(df_final, use_container_width=True, hide_index=True, height=550)
     else:
-        st.info("📊 한국 표준시 기준 주도주 조건에 맞는 종목이 없습니다. 새로고침을 진행해 주세요.")
+        st.info("📊 현재 등락률 및 거래대금 조건을 만족하는 오전 주도주가 없습니다. 새로고침을 진행해 주세요.")
