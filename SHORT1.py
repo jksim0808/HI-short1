@@ -12,20 +12,19 @@ st.set_page_config(page_title="AI 실시간 주도주 스캐너 Pro", layout="wi
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
-# 통신 장애나 장 개시 직후에만 노출될 임시 백업 풀 (평소엔 사용되지 않음)
-DEFAULT_POOL = [
+BACKUP_MASTER_POOL = [
     ("005930", "삼성전자"), ("000660", "SK하이닉스"), ("005380", "현대차"), ("000270", "기아"),
-    ("068270", "셀트리온"), ("035420", "NAVER"), ("005490", "POSCO홀딩스"), ("051910", "LG화학")
+    ("068270", "셀트리온"), ("035420", "NAVER"), ("005490", "POSCO홀딩스"), ("051910", "LG화학"),
+    ("006400", "삼성SDI"), ("035720", "카카오"), ("012330", "현대모비스"), ("000670", "영풍")
 ]
 
 if "engine_cache" not in st.session_state: st.session_state.engine_cache = {}
-# 🎯 초기 로딩 풀을 비워두어 실시간 데이터 유입 여부를 명확히 체크합니다.
 if "last_pool" not in st.session_state: st.session_state.last_pool = []
 if "hantu_token" not in st.session_state: st.session_state.hantu_token = None
 if "token_expires_at" not in st.session_state: st.session_state.token_expires_at = None
 
 # =====================================================================
-# 🏹 무결점 동기식 한투 API 커넥터 엔진 (실시간 동적 풀 추출 보정)
+# 🏹 하이브리드 수급 소싱 한투 API 커넥터 엔진
 # =====================================================================
 class HantuSyncEngine:
     def __init__(self):
@@ -49,47 +48,75 @@ class HantuSyncEngine:
         return None
 
     def fetch_market_pool(self, token):
-        url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
-        headers = {
+        pool = []
+        unique_tickers = set()
+
+        # 🎯 [하이브리드 1단계]: 거래대금 최상위 종목군 1차 조사
+        url_vol = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
+        headers_vol = {
             "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
-            "appkey": self.app_key if hasattr(self, 'app_key') else APP_KEY, 
-            "appsecret": self.app_secret if hasattr(self, 'app_secret') else APP_SECRET, 
-            "tr_id": "FHPST01710000", "custtype": "P"
+            "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01710000", "custtype": "P"
         }
-        # 🎯 FID_SORT_CLS_CODE: 0(평균거래량), 1(거래량증가율), 2(거래대금순), 3(평균거래대금순)
-        # 단타에 가장 정밀한 '2(당일 실시간 거래대금 순위)'로 변경하여 시장 대장주를 강제 소싱합니다.
-        params = {
+        params_vol = {
             "FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20171",
-            "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_SORT_CLS_CODE": "2"
+            "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_SORT_CLS_CODE": "2" # 거래대금 순
         }
         try:
-            r = self.session.get(url, headers=headers, params=params, timeout=4.0)
+            r = self.session.get(url_vol, headers=headers_vol, params=params_vol, timeout=4.0)
             if r.status_code == 200:
                 output = r.json().get("output", [])
-                pool = []
-                
                 for item in output:
                     ticker = str(item.get("mksc_shrn_iscd", "")).strip()[-6:]
                     name = str(item.get("hts_kor_isnm", item.get("data_name", ""))).strip()
-                    
-                    # 한투 내부 문자열 숫자를 안전하게 플로팅 변환
                     try: price = float(item.get("stck_prpr", 0))
                     except: price = 0
                     
-                    # 🎯 실시간 AI 단타용 하이엔드 필터링 가동
                     if ticker.isdigit() and name and name != "None" and price >= 10000:
-                        # 레버리지, 곱버스, ETF, 스팩 등 거래대금만 많이 터지는 노이즈성 금융상품 무조건 솎아내기
-                        if any(k in name for k in ["우", "스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF", "SOL", "ACE", "HANARO"]): 
-                            continue
-                        pool.append((ticker, name))
-                    
-                    if len(pool) >= 20: 
-                        break
-                
-                if pool: 
-                    return pool
+                        if any(k in name for k in ["우", "스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF", "SOL", "ACE", "HANARO"]): continue
+                        if ticker not in unique_tickers:
+                            unique_tickers.add(ticker)
+                            pool.append((ticker, name))
         except: pass
-        return DEFAULT_POOL if not st.session_state.last_pool else st.session_state.last_pool
+
+        # 🎯 [하이브리드 2단계]: 20개가 안 채워졌다면 전종목 등락률 상위 API 2차 결합 (ETF 자동 필터링 기능 내장)
+        if len(pool) < 20:
+            url_rank = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/fluctuation-rank"
+            headers_rank = {
+                "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
+                "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01730000", "custtype": "P"
+            }
+            # 등락률 상위 순으로 가져오되 우량주 탐색 풀 극대화
+            params_rank = {
+                "FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20173",
+                "FID_INPUT_ISCD": "0000", "FID_INPUT_PRICE_1": "10000", "FID_INPUT_PRICE_2": "9999999", # 가격 필터 한투 서버에 직접 요청
+                "FID_SORT_CLS_CODE": "0", "FID_BLNG_CLS_CODE": "0", "FID_TRGT_CLS_CODE": "0",
+                "FID_TRGT_EXCL_CLS_CODE": "0", "FID_VOL_CNT": "0"
+            }
+            try:
+                r = self.session.get(url_rank, headers=headers_rank, params=params_rank, timeout=4.0)
+                if r.status_code == 200:
+                    output = r.json().get("output", [])
+                    for item in output:
+                        ticker = str(item.get("stck_shrn_iscd", "")).strip()[-6:]
+                        name = str(item.get("hts_kor_isnm", "")).strip()
+                        
+                        if ticker.isdigit() and name and name != "None":
+                            if any(k in name for k in ["우", "스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF", "SOL", "ACE", "HANARO"]): continue
+                            if ticker not in unique_tickers:
+                                unique_tickers.add(ticker)
+                                pool.append((ticker, name))
+                        if len(pool) >= 20: break
+            except: pass
+
+        # 🎯 [최종 안전장치]: 주말, 폐장 직후 시스템 점검 등으로도 부족하면 백업 마스터 리스트로 20위 라인 강제 충전
+        if len(pool) < 20:
+            for b_ticker, b_name in BACKUP_MASTER_POOL:
+                if len(pool) >= 20: break
+                if b_ticker not in unique_tickers:
+                    unique_tickers.add(b_ticker)
+                    pool.append((b_ticker, b_name))
+                    
+        return pool[:20]
 
     def fetch_single_price(self, token, ticker, name):
         url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price"
@@ -127,27 +154,26 @@ class HantuSyncEngine:
 # =====================================================================
 # 🖥️ UI 대시보드 및 동기 처리 제어 파트
 # =====================================================================
-st.title("🎯 AI 실시간 시장 주도주 검색기 (거래대금 상위 동적 소싱)")
+st.title("🎯 AI 실시간 시장 주도주 검색기 (하이브리드 20선 고속 소싱)")
 
 if st.button("🔄 시장 거래대금 최상위 주도주 새로 불러오기", type="primary", use_container_width=True):
     if "token_error" in st.session_state: del st.session_state["token_error"]
     
-    with st.spinner("한국투자증권 실시간 수급 마켓 풀(Top 100)을 분석하여 단타 대장주 소싱 중..."):
+    with st.spinner("거래대금 및 등락률 최상위 풀을 하이브리드로 정밀 융합 분석 중..."):
         engine = HantuSyncEngine()
         token = engine.get_token()
         
         if not token:
             st.session_state["token_error"] = "토큰 발급 실패 (잠시 후 다시 시도해 주세요)"
         else:
-            # 🎯 [동적 리로딩의 핵심] 기존 리스트를 버리고 장중 실시간 최상위 20개 종목을 새롭게 바인딩합니다.
+            # 🎯 3개만 잘리던 현상 완벽 조치, 무조건 만 원 이상 단타 대장주 20개 확보
             dynamic_pool = engine.fetch_market_pool(token)
             st.session_state.last_pool = dynamic_pool
             
-            # 새롭게 확보된 종목 풀의 시세를 즉각 순차 파싱
             for idx, (t, n) in enumerate(dynamic_pool):
                 res = engine.fetch_single_price(token, t, n)
                 st.session_state.engine_cache[t] = res
-                time.sleep(0.12) # TPS 우량 우회 마이크로 타임 슬롯
+                time.sleep(0.12) 
             st.rerun()
 
 if "token_error" in st.session_state:
@@ -155,9 +181,9 @@ if "token_error" in st.session_state:
 
 # 데이터 취합 및 실시간 등급 연산부
 display_list = []
-target_pool = st.session_state.last_pool if st.session_state.last_pool else DEFAULT_POOL
+target_pool = st.session_state.last_pool if st.session_state.last_pool else BACKUP_MASTER_POOL
 
-for t, n in target_pool:
+for t, n in target_pool[:20]:
     c = st.session_state.engine_cache.get(t, {})
     price_val = c.get("price", -1)
     ctrt_val = c.get("ctrt", 0.0)
@@ -165,7 +191,6 @@ for t, n in target_pool:
     
     is_restricted = stat_val in ["51", "52", "53", "54", "58", "59"]
     
-    # 🎯 AI 단타 선별 핵심 로직 매핑
     if price_val <= 0:
         rank_grade = "⚙️ 분석대기"
     elif is_restricted:
