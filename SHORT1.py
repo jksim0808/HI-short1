@@ -10,51 +10,49 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # =================================================================
-# 🔑 [한투 공식 규격] Streamlit Secrets 금고 연동
+# 🔑 [한투 실전 규격] Streamlit Secrets 금고 연동
 # =================================================================
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
-HTS_ID = st.secrets.get("HANTU_HTS_ID", "my_htsid").strip()
 
 # =================================================================
-# 🏦 한투 실전/모의 서버 수동 선택 지정 엔진 (404 완벽 디버깅용)
+# 🏦 한투 실전투자 전용 정밀 통신 엔진 (보안 통과 헤더 보강)
 # =================================================================
 class KoreaInvestmentOfficialAPI:
-    def __init__(self, target_mode):
-        # 유저가 선택한 모드에 따라 주소와 TR_ID를 완벽하게 고정 분기합니다.
-        if target_mode == "💰 실전투자망":
-            self.base_url = "https://openapi.koreainvestment.com:9443"
-            self.tr_id = "FHKST01010200"
-            self.mode_name = "실전망"
-        else:
-            self.base_url = "https://openapivts.koreainvestment.com:29443"
-            self.tr_id = "VTKST01010200"
-            self.mode_name = "모의망"
-            
+    def __init__(self):
+        # 오직 실전투자 공식 표준 주소만 타깃팅합니다.
+        self.base_url = "https://openapi.koreainvestment.com:9443"
         self.app_key = APP_KEY
         self.app_secret = APP_SECRET
-        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        # 한투 방화벽 통과를 위한 크롬 표준 브라우저 헤더 위장
+        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         self.session = requests.Session()
 
     def get_access_token(self):
-        """선택된 서버 주소로 인증 토큰 발급"""
-        # 세션에 저장된 토큰이 있고, 유효 기간이 남았으며, 현재 가동 주소와 일치할 때만 캐싱 사용
+        """실전투자 서버 인증 토큰 발급 및 캐싱"""
         if "api_access_token" in st.session_state and st.session_state.api_access_token:
             if "token_expire_time" in st.session_state and datetime.now() < st.session_state.token_expire_time:
-                if st.session_state.get("current_cached_mode") == self.mode_name:
-                    return st.session_state.api_access_token
+                return st.session_state.api_access_token
         
         try:
             url = f"{self.base_url}/oauth2/tokenP"
-            headers = {"content-type": "application/json", "User-Agent": self.user_agent}
-            data = {"grant_type": "client_credentials", "appkey": self.app_key, "appsecret": self.app_secret}
+            # 한투 실전 서버가 요구하는 필수 표준 콘텐츠 타입 지정
+            headers = {
+                "content-type": "application/json; charset=UTF-8",
+                "User-Agent": self.user_agent
+            }
+            data = {
+                "grant_type": "client_credentials", 
+                "appkey": self.app_key, 
+                "appsecret": self.app_secret
+            }
             
             response = self.session.post(url, headers=headers, json=data, timeout=5.0)
             
             if response.status_code != 200:
                 st.session_state.last_api_error = (
-                    f"🚨 [인증 404/에러] {self.mode_name} 접속 실패 (HTTP {response.status_code}). "
-                    f"현재 발급받으신 Key 종류와 좌측 사이드바의 '서버 망 선택'이 일치하는지 확인하십시오!"
+                    f"🚨 [실전 인증 실패] 한투 서버가 연결을 거부했습니다. (HTTP {response.status_code})\n\n"
+                    f"💡 **해결책**: Streamlit Web 관리자 화면의 `Settings` -> `Secrets`에 오타나 앞뒤 공백(스페이스바)이 들어갔는지 꼭 확인해 주십시오."
                 )
                 return None
                 
@@ -62,17 +60,18 @@ class KoreaInvestmentOfficialAPI:
             token = res_json.get("access_token")
             if token:
                 st.session_state.api_access_token = token
+                # 한투 토큰은 24시간 유효하지만 안전하게 11시간으로 캐싱 설정
                 st.session_state.token_expire_time = datetime.now() + timedelta(hours=11)
-                st.session_state.current_cached_mode = self.mode_name
                 return token
             
-            st.session_state.last_api_error = f"🚨 [인증 거부] 서버 메시지: {res_json.get('msg1')}"
+            st.session_state.last_api_error = f"🚨 [인증 거절] 서버 메시지: {res_json.get('msg1')}"
             return None
         except Exception as e:
-            st.session_state.last_api_error = f"💥 [인증 시스템 예외] {str(e)}"
+            st.session_state.last_api_error = f"💥 [인증 시스템 시스템 오류] {str(e)}"
             return None
 
     def get_realtime_price(self, ticker):
+        """실전 국내주식 현재가 시세 호출 (TR_ID: FHKST01010200)"""
         access_token = self.get_access_token()
         if not access_token:
             return None
@@ -83,12 +82,12 @@ class KoreaInvestmentOfficialAPI:
             "authorization": f"Bearer {access_token}",
             "appkey": self.app_key,
             "appsecret": self.app_secret,
-            "tr_id": self.tr_id, 
-            "custtype": "P",           
+            "tr_id": "FHKST01010200", # 실전 주식 시세조회 고유 TR ID
+            "custtype": "P",           # 개인 고객 설정 필수
             "User-Agent": self.user_agent
         }
         params = {
-            "FID_COND_MRKT_DIV_CODE": "J", 
+            "FID_COND_MRKT_DIV_CODE": "J", # J: 주식/ETF 시장구분
             "FID_INPUT_ISCD": str(ticker).strip()
         }
         
@@ -96,12 +95,12 @@ class KoreaInvestmentOfficialAPI:
             response = self.session.get(url, headers=headers, params=params, timeout=5.0)
             
             if response.status_code != 200:
-                st.session_state.last_api_error = f"🚨 [시세 호출 실패] {self.mode_name} 주소 매핑 에러 (HTTP {response.status_code})"
+                st.session_state.last_api_error = f"🚨 [시세 호출 실패] 실전 주소 통신 이상 (HTTP {response.status_code})"
                 return None
                 
             res_json = response.json()
             if res_json.get("rt_cd", "0") != "0":
-                st.session_state.last_api_error = f"🚨 [조회 거절] {get_stock_name(ticker)}: {res_json.get('msg1')}"
+                st.session_state.last_api_error = f"🚨 [실전 조회 거절] {get_stock_name(ticker)}: {res_json.get('msg1')}"
                 return None
                 
             res_data = res_json.get("output", {})
@@ -115,7 +114,7 @@ class KoreaInvestmentOfficialAPI:
                 
                 return {
                     "Close": current_price, "High": high_price, "Low": low_price,
-                    "Volume": volume, "Source": f"한투 {self.mode_name} 직결 완료"
+                    "Volume": volume, "Source": "🔥 한투 실전망 직결 성공"
                 }
             return None
         except Exception as e:
@@ -133,6 +132,7 @@ def get_stock_name(ticker):
     return STOCK_NAME_MAP.get(ticker, f"종목({ticker})")
 
 def process_quant_signals(df):
+    """실전 퀀트 수급 돌파 알고리즘"""
     if len(df) < 2:
         df['VWAP'] = df['Close']; df['RSI'] = 50.0; df['Local_High'] = df['High']; df['타이밍 신호'] = "🟢 관망"
         return df
@@ -164,15 +164,6 @@ def process_quant_signals(df):
 # =================================================================
 st.set_page_config(page_title="실전 수급 스캐너", layout="centered")
 
-# 🚨 [중요] 사이드바에 서버 강제 선택 스위치 배치
-st.sidebar.markdown("### 🌐 한투 통신망 설정")
-selected_market_mode = st.sidebar.radio(
-    "서버 망 선택 (404 해결용)",
-    ["💰 실전투자망", "🧪 모의투자망"],
-    help="한투에서 발급받은 App Key의 종류와 일치해야 404 오류가 나지 않습니다."
-)
-
-st.sidebar.markdown("---")
 st.sidebar.markdown("### 📋 종목 관리")
 raw_input_tickers = st.sidebar.text_area("종목코드 입력", placeholder="예: 005930", height=70)
 
@@ -191,29 +182,30 @@ if st.sidebar.button("⚡ 종목 등록", use_container_width=True):
             st.rerun()
 
 st.markdown("### 🏹 실전 수급 돌파 스캐너 (공식 표준 수동 모드)")
-st.caption(f"💡 현재 화면 데이터 시점: {datetime.now().strftime('%H:%M:%S')} | 📡 가동망: {selected_market_mode}")
+st.caption(f"💡 현재 화면 데이터 시점: {datetime.now().strftime('%H:%M:%S')} | 📡 가동모드: 실전매매 전용")
 
 if st.session_state.last_api_error:
     st.error(st.session_state.last_api_error)
 else:
-    st.info(f"🟢 통신 상태: 준비 완료 ({selected_market_mode} 연결 대기 중)")
+    st.info("🟢 통신 상태: 실전망 가동 준비 완료 (조회 버튼을 누르면 실시간 시세를 호출합니다)")
 
 col_btn1, col_btn2 = st.columns(2)
 click_refresh = col_btn1.button("🔥 [클릭] 한투 실시간 시세 조회/갱신", type="primary", use_container_width=True)
 
-if col_btn2.button("🧹 데이터 초기화 (망 전환시 필수 클릭)", use_container_width=True):
+if col_btn2.button("🧹 캐시 메모리 청소", use_container_width=True):
     st.session_state.multi_market_data = {}
     st.session_state.last_api_error = None
-    if "api_access_token" in st.session_state: del st.session_state["api_access_token"]
+    if "api_access_token" in st.session_state: 
+        del st.session_state["api_access_token"]
     st.rerun()
 
 if not APP_KEY or not APP_SECRET:
-    st.warning("⚠️ Streamlit Secrets 보관함에 API 키 세팅이 감지되지 않았습니다.")
+    st.warning("⚠️ Streamlit Secrets 보관함에 실전투자 전용 앱키 세팅이 완침되지 않았습니다.")
 
 # =================================================================
 # ⚙️ 실시간 데이터 프로세싱 파이프라인
 # =================================================================
-api = KoreaInvestmentOfficialAPI(selected_market_mode)
+api = KoreaInvestmentOfficialAPI()
 current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 if click_refresh:
@@ -249,7 +241,7 @@ for ticker in st.session_state.custom_stock_pool:
         data_source_text = "🛑 대기중"
     else:
         df_frame = st.session_state.multi_market_data[ticker].copy()
-        data_source_text = live_tick["Source"] if 'live_tick' in locals() and live_tick else "연결 완료"
+        data_source_text = live_tick["Source"] if 'live_tick' in locals() and live_tick else "실전 연결 완료"
 
     calculated_df = process_quant_signals(df_frame)
     latest_info = calculated_df.iloc[-1]
