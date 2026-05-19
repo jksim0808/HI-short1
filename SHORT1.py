@@ -75,11 +75,13 @@ async def run_scanner():
 st.set_page_config(page_title="주도주 스캐너", layout="wide")
 st.title("🎯 10,000원 이상 우량 주도주 실시간 스캐너")
 
-# 🔄 시세 갱신 제어 영역
-col_ctrl, col_info = st.columns([3, 5])
-if col_ctrl.button("🔄 실시간 시세 갱신", type="primary", use_container_width=True):
-    asyncio.run(run_scanner())
-    st.rerun()
+# 🎯 [오류 해결 부근] 정수 배수 및 독립 선언으로 문법 충돌 차단
+col_ctrl, col_info = st.columns(2)
+
+with col_ctrl:
+    if st.button("🔄 실시간 시세 갱신", type="primary", use_container_width=True):
+        asyncio.run(run_scanner())
+        st.rerun()
 
 # 데이터 수합 및 정렬용 데이터 프레임 빌드
 display_list = []
@@ -103,10 +105,10 @@ if display_list:
     # 가독성을 위한 순위 칼럼 수동 주입
     df_display.insert(0, "순위", [f"{i+1}위" for i in range(len(df_display))])
     
-    # 🎯 [우측 상단 현황 표기] 총 몇 개가 로딩되었는지 직관적으로 출력
-    col_info.markdown(f"### 📊 현재 수급 포착: **{len(df_display)}개 종목** 전량 모니터링 중")
+    with col_info:
+        st.markdown(f"##### 📊 현재 수급 포착: **{len(df_display)}개 종목** 모니터링 중")
     
-    # 🎯 [핵심 보정] height=750 옵션으로 잘림 현상 완벽 제거 (20개가 스크롤 없이 시원하게 다 노출됨)
+    # 높이 고정 및 가로 너비 확장 유지
     st.dataframe(df_display, use_container_width=True, hide_index=True, height=750)
 else:
     st.info("데이터가 비어있습니다. 위 갱신 버튼을 눌러주세요.")
