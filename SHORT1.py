@@ -10,13 +10,13 @@ from datetime import datetime
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
-# 주도주 고정 20선 백업 마스터 풀
+# 만 원 이상 종목 위주의 백업 마스터 풀 (수급 단절 시 방어용 고정 20선)
 BACKUP_MASTER_POOL = [
     ("005930", "삼성전자"), ("000660", "SK하이닉스"), ("005380", "현대차"), ("000270", "기아"),
     ("068270", "셀트리온"), ("035420", "NAVER"), ("005490", "POSCO홀딩스"), ("051910", "LG화학"),
-    ("006400", "삼성SDI"), ("035720", "카카오"), ("027360", "아주IB투자"), ("021880", "메이슨캐피탈"),
-    ("011000", "진원생명과학"), ("900300", "오가닉티코스메틱"), ("142280", "녹십자엠에스"), ("439960", "코스모로보틱스"),
-    ("066980", "한성크린텍"), ("203650", "드림시큐리티"), ("066430", "아이로보틱스"), ("307870", "비투엔")
+    ("006400", "삼성SDI"), ("035720", "카카오"), ("439960", "코스모로보틱스"), ("000670", "영풍"),
+    ("012450", "한화에어로스페이스"), ("009830", "한화솔루션"), ("034020", "두산에너빌리티"), ("010140", "삼성중공업"),
+    ("015760", "한국전력"), ("004020", "현대제철"), ("011780", "금호석유"), ("010950", "S-Oil")
 ]
 
 # 로컬 메모리 이중 버퍼 캐시 초기화
@@ -38,7 +38,7 @@ async def fetch_token_async(client):
         return None
 
 # =================================================================
-# 📊 2. 거래대금 상위 수급 풀 가져오기 (비동기 필터링)
+# 📊 2. [개선] 거래대금 상위 수급 풀 중 '현재가 10,000원 이상'만 필터링
 # =================================================================
 async def fetch_volume_rank_async(client, token):
     url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
@@ -58,9 +58,15 @@ async def fetch_volume_rank_async(client, token):
             for item in output:
                 ticker = str(item.get("mksc_shrn_iscd", "")).strip()[-6:]
                 name = str(item.get("hts_kor_isnm", item.get("data_name", ""))).strip()
+                
+                # 🎯 [핵심 조건 추가] 한투 수급 랭킹의 현재가(stck_prpr) 정보 추출
+                current_price = float(item.get("stck_prpr", 0))
+                
                 if ticker.isdigit() and name and name != "None":
-                    # 단타 방해 요소 노이즈 필터링
+                    # 노이즈 종목 및 ❌ 현재가 10,000원 미만 동전주/소형주 원천 필터 차단
+                    if current_price < 10000: continue
                     if any(k in name for k in ["우", "스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER"]): continue
+                    
                     pool.append((ticker, name))
             return pool
     except:
@@ -95,7 +101,6 @@ async def fetch_single_price_throttled(client, token, ticker, name, delay):
     except:
         pass
     
-    # 지연/유실 발생 시 이중 버퍼 가동 -> 메모리에 들고 있던 직전 데이터를 반환하여 대기 문구 원천 차단
     old = st.session_state.price_cache.get(ticker, {"price": 0, "ctrt": 0.0, "volume": 0, "timestamp": "-"})
     return {
         "ticker": ticker, "name": name,
@@ -114,18 +119,20 @@ async def update_all_prices_safe():
             st.error("한투 Access Token 발급에 실패했습니다.")
             return
 
-        # 최초 실행 시 주도주 리스트 확보
-        if not st.session_state.active_pool:
-            raw_pool = await fetch_volume_rank_async(client, token)
-            temp_pool = {}
-            for ticker, name in raw_pool:
+        # 만 원 이상 필터가 적용된 주도주 리스트 정밀 타겟팅
+        raw_pool = await fetch_volume_rank_async(client, token)
+        temp_pool = {}
+        for ticker, name in raw_pool:
+            if len(temp_pool) >= 20: break
+            temp_pool[ticker] = name
+        
+        # 20선 부족분 발생 시 백업 마스터 풀에서 보충
+        if len(temp_pool) < 20:
+            for ticker, name in BACKUP_MASTER_POOL:
                 if len(temp_pool) >= 20: break
-                temp_pool[ticker] = name
-            if len(temp_pool) < 20:
-                for ticker, name in BACKUP_MASTER_POOL:
-                    if len(temp_pool) >= 20: break
-                    if ticker not in temp_pool: temp_pool[ticker] = name
-            st.session_state.active_pool = temp_pool
+                if ticker not in temp_pool: temp_pool[ticker] = name
+                
+        st.session_state.active_pool = temp_pool
 
         # 과부하 차단용 0.05초 간격 미세 분사 설정
         tasks = []
@@ -133,7 +140,6 @@ async def update_all_prices_safe():
             delay = idx * 0.05  
             tasks.append(fetch_single_price_throttled(client, token, ticker, name, delay))
         
-        # 🎯 정상 보정된 문법으로 비동기 병렬 수합
         results = await asyncio.gather(*tasks)
         
         # 캐시 버퍼에 결과 매핑
@@ -144,27 +150,26 @@ async def update_all_prices_safe():
             }
 
 def run_async_bridge(coro):
-    """ Streamlit과 비동기 엔진을 이어주는 브릿지 함수 """
     return asyncio.run(coro)
 
 # =================================================================
 # 🖥️ 4. UI 대시보드 출력부
 # =================================================================
-st.set_page_config(page_title="렉 방지 무결점 스캐너", layout="wide")
-st.title("🎯 AI 장중 거래대금 20선 무결점 실시간 스캐너")
+st.set_page_config(page_title="만 원 이상 주도주 스캐너", layout="wide")
+st.title("🎯 AI 장중 거래대금 20선 무결점 실시간 스캐너 (10,000원↑)")
 
 with st.container(border=True):
-    st.subheader("🛠️ 안정성 강화: 서버대기 상태 완벽 제거")
+    st.subheader("🛠️ 엔진 가동 조건 : 현재가 10,000원 이상 고수급주 타겟팅")
     st.markdown("""
-    * **마이크로 타임 슬롯팅:** 한투 서버에 20개 요청이 동시에 도달해 튕기지 않도록 대기열을 0.05초 단위로 쪼개서 송신합니다.
-    * **이중 버퍼 캐시:** 장중 한투 통신망 지연으로 데이터 유실이 발생하더라도, 로컬에 저장된 직전 시세를 즉시 메꿔 넣어 `⚠️ 서버대기` 문구 없이 정상 작동을 고정합니다.
+    * **동전주/잡주 원천 배제:** 당일 거래량이 아무리 튀어도 현재가가 **10,000원 미만인 종목은 자동으로 스캔 대상에서 제외**됩니다. 호가창이 단단하고 변동성이 제어되는 라운드피겨(만 원) 이상의 주도주 위주로 매매 전략을 수립할 수 있습니다.
+    * **무결점 캐싱 엔진:** 한투 초당 호출 제한을 피하는 0.05초 타임 슬롯 제어와 직전 데이터 이중 보정으로 `⚠️ 서버대기` 없는 매끄러운 시세를 보장합니다.
     """)
 
 st.markdown("---")
 
 col_ctrl, _ = st.columns([3, 5])
 if col_ctrl.button("🔄 초고속 시세 동기화 및 실시간 스캔", type="primary", use_container_width=True):
-    with st.spinner("🚀 수급 데이터 정밀 스캔 중..."):
+    with st.spinner("🚀 만 원 이상 우량 주도주 정밀 추출 중..."):
         run_async_bridge(update_all_prices_safe())
         st.rerun()
 
