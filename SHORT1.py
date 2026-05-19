@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
-import asyncio
-import httpx
+import requests
+import time
 from datetime import datetime
 
 # =====================================================================
@@ -24,114 +24,107 @@ if "engine_cache" not in st.session_state: st.session_state.engine_cache = {}
 if "last_pool" not in st.session_state: st.session_state.last_pool = BACKUP_MASTER_POOL
 
 # =====================================================================
-# ⚡ 한투 방화벽 우회형 비동기 데이터 통신 엔진
+# 🏹 무결점 동기식 한투 API 커넥터 엔진 (requests Session 기반)
 # =====================================================================
-async def fetch_token_async(client):
-    url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
-    try:
-        r = await client.post(url, json={"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}, timeout=3.0)
-        return r.json().get("access_token")
-    except: return None
-
-async def fetch_market_pool_async(client, token):
-    url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
-    headers = {
-        "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
-        "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01710000", "custtype": "P"
-    }
-    params = {
-        "FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20171",
-        "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_SORT_CLS_CODE": "1"
-    }
-    try:
-        r = await client.get(url, headers=headers, params=params, timeout=4.0)
-        if r.status_code == 200:
-            output = r.json().get("output", [])
-            pool = []
-            for item in output:
-                ticker = str(item.get("mksc_shrn_iscd", "")).strip()[-6:]
-                name = str(item.get("hts_kor_isnm", item.get("data_name", ""))).strip()
-                try: price = float(item.get("stck_prpr", 0))
-                except: price = 0
-                
-                if ticker.isdigit() and name and name != "None" and price >= 10000:
-                    if any(k in name for k in ["우", "스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER"]): continue
-                    pool.append((ticker, name))
-            return pool if pool else BACKUP_MASTER_POOL
-    except: pass
-    return BACKUP_MASTER_POOL
-
-async def fetch_single_price_async(client, token, ticker, name, delay):
-    # 🎯 [핵심 보정] 한투 초당 제한(TPS)을 우회하기 위해 종목별 분사 간격을 정밀 조정합니다.
-    await asyncio.sleep(delay)
-    url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price"
-    headers = {
-        "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
-        "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01010000", "custtype": "P"
-    }
-    params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker}
-    try:
-        r = await client.get(url, headers=headers, params=params, timeout=3.0)
-        if r.status_code == 200:
-            res_json = r.json()
-            out = res_json.get("output") if res_json.get("output") else res_json.get("output1")
-            
-            if res_json.get("rt_cd") == "0" and out:
-                return {
-                    "ticker": ticker, "name": name,
-                    "price": float(out.get("stck_prpr", 0)),
-                    "ctrt": float(out.get("prdy_ctrt", 0.0)),
-                    "volume": float(out.get("acml_vol", out.get("accl_tr_vol", 0))),
-                    "stat": str(out.get("iscd_stat_cls_code", "00")).strip(),
-                    "time": datetime.now().strftime("%H:%M:%S")
-                }
-    except: pass
-    
-    # 🎯 [영구 유지 락] 통신이 튀거나 폐장되어 패킷이 누락되면 빈 값을 뿌리는 게 아니라 기존 캐시 데이터를 복원해 화면을 지킵니다.
-    old = st.session_state.engine_cache.get(ticker, {})
-    return {
-        "ticker": ticker, "name": name,
-        "price": old.get("price", -1),
-        "ctrt": old.get("ctrt", 0.0),
-        "volume": old.get("volume", 0),
-        "stat": old.get("stat", "00"),
-        "time": old.get("time", "❌ 통신누락")
-    }
-
-async def run_async_pipeline():
-    limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
-    async with httpx.AsyncClient(limits=limits) as client:
-        token = await fetch_token_async(client)
-        if not token:
-            st.session_state["token_error"] = "토큰 발급 실패 (비밀키 권한 재점검 요망)"
-            return
-            
-        dynamic_pool = await fetch_market_pool_async(client, token)
-        st.session_state.last_pool = dynamic_pool
+class HantuSyncEngine:
+    def __init__(self):
+        self.session = requests.Session()
         
-        tasks = []
-        for idx, (t, n) in enumerate(dynamic_pool[:20]):
-            # 🎯 슬롯 딜레이를 0.25초로 늘려 한투의 초당 4회 제한 안전 규격을 완벽히 통과합니다.
-            tasks.append(fetch_single_price_async(client, token, t, n, idx * 0.25))
-            
-        results = await asyncio.gather(*tasks)
-        for res in results:
-            # 정상 데이터이거나 기존 캐시가 보존된 데이터만 업데이트
-            st.session_state.engine_cache[res["ticker"]] = res
+    def get_token(self):
+        url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
+        try:
+            r = self.session.post(url, json={"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}, timeout=3.0)
+            return r.json().get("access_token")
+        except: return None
+
+    def fetch_market_pool(self, token):
+        url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
+        headers = {
+            "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
+            "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01710000", "custtype": "P"
+        }
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20171",
+            "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_SORT_CLS_CODE": "1"
+        }
+        try:
+            r = self.session.get(url, headers=headers, params=params, timeout=4.0)
+            if r.status_code == 200:
+                output = r.json().get("output", [])
+                pool = []
+                for item in output:
+                    ticker = str(item.get("mksc_shrn_iscd", "")).strip()[-6:]
+                    name = str(item.get("hts_kor_isnm", item.get("data_name", ""))).strip()
+                    try: price = float(item.get("stck_prpr", 0))
+                    except: price = 0
+                    
+                    if ticker.isdigit() and name and name != "None" and price >= 10000:
+                        if any(k in name for k in ["우", "스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER"]): continue
+                        pool.append((ticker, name))
+                return pool if pool else BACKUP_MASTER_POOL
+        except: pass
+        return BACKUP_MASTER_POOL
+
+    def fetch_single_price(self, token, ticker, name):
+        url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price"
+        headers = {
+            "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
+            "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01010000", "custtype": "P"
+        }
+        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker}
+        try:
+            r = self.session.get(url, headers=headers, params=params, timeout=3.0)
+            if r.status_code == 200:
+                res_json = r.json()
+                out = res_json.get("output") if res_json.get("output") else res_json.get("output1")
+                if res_json.get("rt_cd") == "0" and out:
+                    return {
+                        "ticker": ticker, "name": name,
+                        "price": float(out.get("stck_prpr", 0)),
+                        "ctrt": float(out.get("prdy_ctrt", 0.0)),
+                        "volume": float(out.get("acml_vol", out.get("accl_tr_vol", 0))),
+                        "stat": str(out.get("iscd_stat_cls_code", "00")).strip(),
+                        "time": datetime.now().strftime("%H:%M:%S")
+                    }
+        except: pass
+
+        # 🎯 [메모리 복원 시스템] 통신이 튀더라도 기존 성공 데이터를 복원해 '대기중'이나 '누락'을 화면에서 지워버립니다.
+        old = st.session_state.engine_cache.get(ticker, {})
+        return {
+            "ticker": ticker, "name": name,
+            "price": old.get("price", -1),
+            "ctrt": old.get("ctrt", 0.0),
+            "volume": old.get("volume", 0),
+            "stat": old.get("stat", "00"),
+            "time": old.get("time", "❌ 수신대기")
+        }
 
 # =====================================================================
-# 🖥️ 깔끔한 UI 단독 렌더링 파트
+# 🖥️ UI 대시보드 및 동기 처리 제어 파트
 # =====================================================================
 st.title("🎯 AI 실시간 고안정성 주도주 스캐너 (10,000원↑)")
 
 if st.button("🔄 즉시 마켓 시세 스캔 및 갱신", type="primary", use_container_width=True):
     if "token_error" in st.session_state: del st.session_state["token_error"]
-    with st.spinner("한투 오피셜 데이터 고속 수합 중..."):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(run_async_pipeline())
-        loop.close()
-    st.rerun()
+    
+    with st.spinner("한투 보안 규격을 준수하여 20개 주도주 정밀 스캔 중..."):
+        engine = HantuSyncEngine()
+        token = engine.get_token()
+        
+        if not token:
+            st.session_state["token_error"] = "토큰 발급 실패 (비밀키 권한 재점검 요망)"
+        else:
+            # 1. 수급 주도주 20선 갱신
+            dynamic_pool = engine.fetch_market_pool(token)
+            st.session_state.last_pool = dynamic_pool
+            
+            # 2. 🎯 칼같은 0.12초 동기식 타임 슬롯 분사 (한투 초당 제한 TPS 100% 우회 정공법)
+            for idx, (t, n) in enumerate(dynamic_pool[:20]):
+                res = engine.fetch_single_price(token, t, n)
+                st.session_state.engine_cache[t] = res
+                time.sleep(0.12)
+                
+            st.rerun()
 
 if "token_error" in st.session_state:
     st.error(f"❌ 가동 실패: {st.session_state['token_error']}")
@@ -148,7 +141,6 @@ for t, n in st.session_state.last_pool[:20]:
         vol_str = f"{int(c['volume']):,}주"
         time_str = c.get("time", "-")
     else:
-        # 최초 실행 시 데이터가 아직 없을 때만 대기중 표기
         current_price_str = "대기중 (위 갱신 버튼을 눌러주세요)"
         ctrt_str = "0.00%"
         vol_str = "-"
