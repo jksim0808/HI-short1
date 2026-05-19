@@ -59,7 +59,7 @@ with col3:
 st.write("---") # 시각적 구분을 위한 구분선
 
 # =====================================================================
-# 🏹 오피셜 순위 출력 한투 API 커넥터 엔진
+# 🏹 오피셜 순위 출력 한투 API 커넥터 엔진 (거래대금 순위 개조 버전)
 # =====================================================================
 class HantuSyncEngine:
     def __init__(self):
@@ -84,14 +84,20 @@ class HantuSyncEngine:
 
     def fetch_market_pool(self, token):
         pool = []
+        # 🛠️ [엔진 수정] 단순 거래량 순위가 아닌 진짜 돈이 몰리는 '거래대금 순위' API로 교체
         url_vol = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
         headers_vol = {
             "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
-            "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01710000", "custtype": "P"
+            "appkey": APP_KEY, "appsecret": APP_SECRET, 
+            "tr_id": "FHPST01710000", # 동일 API 내에서 파라미터 제어
+            "custtype": "P"
         }
         params_vol = {
-            "FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20171",
-            "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_SORT_CLS_CODE": "2"
+            "FID_COND_MRKT_DIV_CODE": "J", 
+            "FID_COND_SCR_DIV_CODE": "20171",
+            "FID_INPUT_ISCD": "0000", 
+            "FID_DIV_CLS_CODE": "0", 
+            "FID_SORT_CLS_CODE": "3" # 🛠️ [엔진 수정] 기존 '2(거래량순)'에서 '3(거래대금순)'으로 변경하여 삼성전자 소싱 보장
         }
         try:
             r = self.session.get(url_vol, headers=headers_vol, params=params_vol, timeout=4.0)
@@ -104,7 +110,14 @@ class HantuSyncEngine:
                     except: price = 0
                     
                     if ticker.isdigit() and name and name != "None" and price >= 10000:
-                        if any(k in name for k in ["우", "스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF", "SOL", "ACE", "HANARO"]): continue
+                        # 🛠️ [노이즈 필터 수정] 이름 중간에 '우'가 들어간 정상 우량주(예: 삼성전자)는 살리고, 실제 우선주만 정교하게 차단
+                        if any(k in name for k in ["스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF", "SOL", "ACE", "HANARO"]): 
+                            continue
+                        
+                        # 종목명이 '우'로 끝나거나 '우' 뒤에 우선주 등급번호가 붙는 경우만 필터링
+                        if name.endswith("우") or any(name.endswith(f"우{suffix}") for suffix in ["B", "C", " 우선주", "1", "2", "3"]):
+                            continue
+                            
                         pool.append((ticker, name))
         except: pass
         return pool
@@ -176,7 +189,6 @@ if st.session_state.last_pool:
         
         is_restricted = stat_val in ["51", "52", "53", "54", "58", "59"]
         
-        # ⚠️ [수정] 최소 진입 제한 등락률 조건을 1.0으로 변경
         if price_val <= 0 or is_restricted or ctrt_val < 1.0:
             continue
             
@@ -203,5 +215,4 @@ if not df_final.empty:
     df_final.insert(0, "시장투자순위", [f"{i+1}위" for i in range(len(df_final))])
     st.dataframe(df_final, use_container_width=True, hide_index=True, height=650)
 else:
-    # ⚠️ [수정] 안내 메시지의 조건 표기도 +1%로 변경
     st.info("📊 현재 당일 주도주 조건(+1% 이상 상승 우량주)에 부합하는 매매 대상 종목이 없습니다. 무리한 진입을 피하고 대기자금을 보존하십시오.")
