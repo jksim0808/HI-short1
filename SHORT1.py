@@ -12,7 +12,7 @@ APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
 # =================================================================
-# 🏦 한투 실전투자 전용 파싱 엔진 (시장 코드 표준 통합형)
+# 🏦 한투 실전투자 전용 파싱 엔진 (파두 현재가 정밀 보정형)
 # =================================================================
 class KoreaInvestmentOfficialAPI:
     def __init__(self):
@@ -40,53 +40,51 @@ class KoreaInvestmentOfficialAPI:
             return None, "토큰 누락"
             
         url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
-        
-        # 🎯 [핵심 보정] 한투 주식현재가 TR은 코스피/코스닥 불문 "J"로 지정해야 데이터 알맹이가 들어옵니다.
-        market_div = "J" 
-        
         headers = {
             "content-type": "application/json; charset=utf-8",
             "authorization": f"Bearer {token}",
             "appkey": self.app_key,
             "appsecret": self.app_secret,
-            "tr_id": "FHKST01010100",  # 주식현재가 시세조회 표준 TR
+            "tr_id": "FHKST01010100",
             "custtype": "P"
         }
-        params = {"FID_COND_MRKT_DIV_CODE": market_div, "FID_INPUT_ISCD": str(ticker).strip()}
+        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": str(ticker).strip()}
         
         try:
             r = requests.get(url, headers=headers, params=params, timeout=5)
             if r.status_code == 200:
                 res_json = r.json()
                 
-                rt_cd = str(res_json.get("rt_cd", "")).strip()
-                msg1 = res_json.get("msg1", "").strip()
+                # 한투 복합 패킷 디코딩 로직 통합
                 out1 = res_json.get("output")
-                
-                if not out1:
-                    out1 = res_json.get("output1")
-                
                 if isinstance(out1, list) and len(out1) > 0:
                     out1 = out1[0]
+                elif not out1 or not isinstance(out1, dict):
+                    out1 = res_json.get("output1", {})
+                    if isinstance(out1, list) and len(out1) > 0:
+                        out1 = out1[0]
                 
-                if isinstance(out1, dict) and "stck_prpr" in out1:
+                if isinstance(out1, dict) and ("stck_prpr" in out1 or "prpr" in out1):
                     def _clean(val):
                         if val is None or str(val).strip() == "": return 0.0
                         return float(str(val).strip().replace("-", "").replace("+", ""))
                     
+                    # 가격 필드 다중 교차 검증 (파두 등 코스닥 종목 예외 방어)
                     close_val = _clean(out1.get("stck_prpr"))
+                    if close_val == 0:
+                        close_val = _clean(out1.get("prpr"))
                     
                     if close_val > 0:
                         data_dict = {
                             "Close": close_val,
-                            "High": _clean(out1.get("stck_hgpr")),
-                            "Low": _clean(out1.get("stck_lwpr")),
-                            "Volume": _clean(out1.get("accl_tr_vol")),
-                            "PrdyCtrt": float(str(out1.get("prdy_ctrt", "0.0")).strip())
+                            "High": _clean(out1.get("stck_hgpr") if out1.get("stck_hgpr") else out1.get("hgpr", 0)),
+                            "Low": _clean(out1.get("stck_lwpr") if out1.get("stck_lwpr") else out1.get("lwpr", 0)),
+                            "Volume": _clean(out1.get("accl_tr_vol") if out1.get("accl_tr_vol") else out1.get("vol", 0)),
+                            "PrdyCtrt": float(str(out1.get("prdy_ctrt" if out1.get("prdy_ctrt") else "ctrt", "0.0")).strip())
                         }
                         return data_dict, "성공 (연동완료)"
                 
-                return None, f"서버처리 보류 -> [코드: {rt_cd}] {msg1}"
+                return None, f"데이터 필드 공백 -> 로그 확인 필요"
             else:
                 return None, f"HTTP 에러 (통신상태: {r.status_code})"
         except Exception as e:
@@ -115,7 +113,7 @@ def get_ai_lead_stocks():
 st.set_page_config(page_title="AI 주도주 실시간 단타 스캐너", layout="wide")
 
 st.title("🎯 AI 정예 주도주 10선 실시간 단타 스캐너")
-st.caption(f" 가동 시점: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 코스닥 수급 완벽 연동 판")
+st.caption(f" 가동 시점: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 실시간 현재가 정밀 보정 버전")
 
 if "market_history" not in st.session_state:
     st.session_state.market_history = {}
@@ -127,17 +125,15 @@ master_pool = get_ai_lead_stocks()
 
 col_btn1, col_btn2, col_info = st.columns([1, 1, 3])
 
-if col_btn1.button("⚡ AI 정예 10선 수급 동기화", type="primary", use_container_width=True, key="btn_sync_market_unified"):
+if col_btn1.button("⚡ AI 정예 10선 수급 동기화", type="primary", use_container_width=True, key="btn_sync_perfect_final"):
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     with st.spinner("한투 보안 표준 인증 토큰 획득 중..."):
         master_token = api.get_fresh_access_token()
         
     if not master_token:
-        st.error("🚨 [인증단계 거부] 한투 서버가 토큰 발급을 거절했습니다. Secrets 설정을 재점검하십시오.")
+        st.error("🚨 한투 서버 토큰 발급 실패. Secrets 설정을 재점검하십시오.")
     else:
-        st.success("🔑 1단계 통과: 한투 표준 인증 토큰 발급 완료")
-        
         temp_history = {}
         temp_pct = {}
         success_count = 0
@@ -151,7 +147,12 @@ if col_btn1.button("⚡ AI 정예 10선 수급 동기화", type="primary", use_c
         for idx, (ticker, name) in enumerate(master_pool.items()):
             data, server_msg = api.get_realtime_price(ticker, master_token)
             
-            log_messages.append(f"• **{name} ({ticker})** -> {server_msg}")
+            # 장중 실시간 데이터 모니터링 출력 강화
+            if data:
+                log_messages.append(f"• **{name} ({ticker})** -> 현재가: {int(data['Close']):,}원 (연동 완수)")
+            else:
+                log_messages.append(f"• **{name} ({ticker})** -> 실패 사유: {server_msg}")
+                
             log_box.markdown("\n".join(log_messages))
             
             if data and data["Close"] > 0:
@@ -176,17 +177,13 @@ if col_btn1.button("⚡ AI 정예 10선 수급 동기화", type="primary", use_c
             st.session_state.market_history.update(temp_history)
             st.session_state.live_pct_map.update(temp_pct)
             st.session_state["data_loaded"] = True
-            st.toast("정예 10선 수급 데이터 동기화 완수!", icon="🟢")
-        else:
-            st.error("🚨 [수신 실패] 데이터 파싱 구조를 확인하십시오.")
+            st.toast("전 종목 실시간 단타 판 갱신 완료!", icon="🟢")
 
-if col_btn2.button("🧹 단타 캐시 리셋", use_container_width=True, key="btn_reset_market_unified"):
+if col_btn2.button("🧹 단타 캐시 리셋", use_container_width=True, key="btn_reset_perfect_final"):
     st.session_state.market_history = {}
     st.session_state.live_pct_map = {}
     if "data_loaded" in st.session_state: del st.session_state["data_loaded"]
     st.rerun()
-
-col_info.markdown("💡 **수정 완료:** 코스닥 분기 코드를 `J`로 표준화하여 실시간 패킷 락을 완전히 해제했습니다.")
 
 st.markdown("---")
 
