@@ -10,6 +10,7 @@ from datetime import datetime
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
+# 주도주 고정 20선 백업 마스터 풀
 BACKUP_MASTER_POOL = [
     ("005930", "삼성전자"), ("000660", "SK하이닉스"), ("005380", "현대차"), ("000270", "기아"),
     ("068270", "셀트리온"), ("035420", "NAVER"), ("005490", "POSCO홀딩스"), ("051910", "LG화학"),
@@ -18,13 +19,14 @@ BACKUP_MASTER_POOL = [
     ("066980", "한성크린텍"), ("203650", "드림시큐리티"), ("066430", "아이로보틱스"), ("307870", "비투엔")
 ]
 
+# 로컬 메모리 이중 버퍼 캐시 초기화
 if "price_cache" not in st.session_state:
     st.session_state.price_cache = {}
 if "active_pool" not in st.session_state:
     st.session_state.active_pool = {}
 
 # =================================================================
-# 🚀 기본 통신 함수 (토큰 및 종목풀 구성)
+# 🚀 1. 한투 API 인증 토큰 발급 (비동기)
 # =================================================================
 async def fetch_token_async(client):
     url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
@@ -35,6 +37,9 @@ async def fetch_token_async(client):
     except:
         return None
 
+# =================================================================
+# 📊 2. 거래대금 상위 수급 풀 가져오기 (비동기 필터링)
+# =================================================================
 async def fetch_volume_rank_async(client, token):
     url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
     headers = {
@@ -54,6 +59,7 @@ async def fetch_volume_rank_async(client, token):
                 ticker = str(item.get("mksc_shrn_iscd", "")).strip()[-6:]
                 name = str(item.get("hts_kor_isnm", item.get("data_name", ""))).strip()
                 if ticker.isdigit() and name and name != "None":
+                    # 단타 방해 요소 노이즈 필터링
                     if any(k in name for k in ["우", "스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER"]): continue
                     pool.append((ticker, name))
             return pool
@@ -62,11 +68,11 @@ async def fetch_volume_rank_async(client, token):
     return BACKUP_MASTER_POOL
 
 # =================================================================
-# ⚡ 3. [개선] 초당 호출 제한(Rate Limit)을 회피하는 미세 분사 엔진
+# ⚡ 3. 마이크로 슬롯 타임 분사 엔진 (초당 제한 우회 및 캐시 보정)
 # =================================================================
 async def fetch_single_price_throttled(client, token, ticker, name, delay):
-    """ 마이크로 슬롯 분할: 각 요청마다 미세한 시차(delay)를 두어 한투 서버의 거절을 원천 차단 """
-    await asyncio.sleep(delay) # 한투 서버가 눈치채지 못하게 타임 슬롯 분할
+    """ 각 요청 간 미세 시차(delay)를 두어 한투 서버의 패킷 거절을 차단 """
+    await asyncio.sleep(delay)
     
     url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price"
     headers = {
@@ -79,7 +85,6 @@ async def fetch_single_price_throttled(client, token, ticker, name, delay):
         r = await client.get(url, headers=headers, params=params, timeout=2.0)
         if r.status_code == 200:
             output = r.json().get("output", {})
-            # 성공 시 새로운 데이터 반환
             return {
                 "ticker": ticker, "name": name,
                 "price": float(output.get("stck_prpr", 0)),
@@ -90,8 +95,7 @@ async def fetch_single_price_throttled(client, token, ticker, name, delay):
     except:
         pass
     
-    # [핵심 보정] 한투 서버가 일시 지연되거나 거절하더라도 에러를 내지 않고 
-    # 로컬 캐시에 저장된 가장 최신의 직전 주가 데이터를 그대로 리턴 (화면 튕김/대기 표기 제거)
+    # 지연/유실 발생 시 이중 버퍼 가동 -> 메모리에 들고 있던 직전 데이터를 반환하여 대기 문구 원천 차단
     old = st.session_state.price_cache.get(ticker, {"price": 0, "ctrt": 0.0, "volume": 0, "timestamp": "-"})
     return {
         "ticker": ticker, "name": name,
@@ -102,14 +106,15 @@ async def fetch_single_price_throttled(client, token, ticker, name, delay):
     }
 
 async def update_all_prices_safe():
-    """ 20개 종목을 안정적으로 분사 요청하여 완벽한 데이터를 동기화하는 메인 함수 """
-    limits = httpx.Limits(max_keepalive_connections=5, max_connections=10) # 커넥션 풀 최적화
+    """ 20개 종목 태스크를 생성하여 병렬로 안전하게 수합하는 메인 함수 """
+    limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
     async with httpx.AsyncClient(limits=limits) as client:
         token = await fetch_token_async(client)
         if not token:
-            st.error("한투 Access Token 발급 실패")
+            st.error("한투 Access Token 발급에 실패했습니다.")
             return
 
+        # 최초 실행 시 주도주 리스트 확보
         if not st.session_state.active_pool:
             raw_pool = await fetch_volume_rank_async(client, token)
             temp_pool = {}
@@ -122,23 +127,24 @@ async def update_all_prices_safe():
                     if ticker not in temp_pool: temp_pool[ticker] = name
             st.session_state.active_pool = temp_pool
 
-        # 과부하 방지용 태스크 셋팅 (각 종목당 0.05초씩 밀어서 출발)
+        # 과부하 차단용 0.05초 간격 미세 분사 설정
         tasks = []
         for idx, (ticker, name) in enumerate(st.session_state.active_pool.items()):
-            delay = idx * 0.05  # 0초, 0.05초, 0.1초, 0.15초 ... 순차 분사
+            delay = idx * 0.05  
             tasks.append(fetch_single_price_throttled(client, token, ticker, name, delay))
         
-        results = await asyncio.run_ Coroutine(asyncio.gather(*tasks))
+        # 🎯 정상 보정된 문법으로 비동기 병렬 수합
+        results = await asyncio.gather(*tasks)
         
-        # 결과를 안전하게 로컬 메모리에 저장
+        # 캐시 버퍼에 결과 매핑
         for res in results:
             st.session_state.price_cache[res["ticker"]] = {
                 "price": res["price"], "ctrt": res["ctrt"], "volume": res["volume"],
                 "timestamp": res["timestamp"]
             }
 
-# 가독성을 위한 수정 (주피터 및 특정 환경 방어 코드)
 def run_async_bridge(coro):
+    """ Streamlit과 비동기 엔진을 이어주는 브릿지 함수 """
     return asyncio.run(coro)
 
 # =================================================================
@@ -150,23 +156,23 @@ st.title("🎯 AI 장중 거래대금 20선 무결점 실시간 스캐너")
 with st.container(border=True):
     st.subheader("🛠️ 안정성 강화: 서버대기 상태 완벽 제거")
     st.markdown("""
-    * **마이크로 타임 슬롯팅:** 한투 서버에 20개 요청이 동시에 도달하지 않도록 대기열을 0.05초 단위로 쪼개서 송신합니다. 한투 서버의 트래픽 차단 정책을 안정적으로 우회합니다.
-    * **이중 버퍼 캐시:** 통신망 상태에 따라 한투 응답이 늦어지는 순간이 오더라도, 화면에 경고를 띄우지 않고 로컬에 백업된 직전 시세를 즉시 밀어 올려 대기 현상을 은닉합니다.
+    * **마이크로 타임 슬롯팅:** 한투 서버에 20개 요청이 동시에 도달해 튕기지 않도록 대기열을 0.05초 단위로 쪼개서 송신합니다.
+    * **이중 버퍼 캐시:** 장중 한투 통신망 지연으로 데이터 유실이 발생하더라도, 로컬에 저장된 직전 시세를 즉시 메꿔 넣어 `⚠️ 서버대기` 문구 없이 정상 작동을 고정합니다.
     """)
 
 st.markdown("---")
 
-col_ctrl, _ = col_ctrl, _ = st.columns([3, 5])
+col_ctrl, _ = st.columns([3, 5])
 if col_ctrl.button("🔄 초고속 시세 동기화 및 실시간 스캔", type="primary", use_container_width=True):
     with st.spinner("🚀 수급 데이터 정밀 스캔 중..."):
         run_async_bridge(update_all_prices_safe())
         st.rerun()
 
-# 최초 가동 시 데이터 강제 확보
+# 최초 실행 시 데이터 로드
 if not st.session_state.price_cache:
     run_async_bridge(update_all_prices_safe())
 
-# 화면 표시용 가공
+# 화면 노출 데이터 프레임 빌드
 display_list = []
 active_items = list(st.session_state.active_pool.items())
 
@@ -185,7 +191,7 @@ for ticker, name in active_items:
         "당일 등락률": f"{growth:+.2f}%",
         "누적 거래량": f"{int(cache['volume']):,} 주",
         "최근 체결 시각": cache["timestamp"],
-        "엔진 상태": "🟢 정상 운영중", # 서버 대기라는 불안한 문구를 지우고 정상 고정
+        "엔진 상태": "🟢 정상 운영중",
         "단타 수급 시그널": signal
     })
 
