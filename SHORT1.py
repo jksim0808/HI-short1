@@ -27,6 +27,7 @@ class KoreaInvestmentOfficialAPI:
         except:
             return None
 
+    # 거래대금 상위 종목 풀 추출
     def get_market_leading_tickers(self, token):
         if not token: return {"005930": "삼성전자", "027360": "아주IB투자", "021880": "메이슨캐피탈"}
         url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/volume-rank"
@@ -54,12 +55,13 @@ class KoreaInvestmentOfficialAPI:
                         noise_keywords = ["우", "스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KBSTAR", "ACE", "HANARO", "SOL", "선물", "ETN"]
                         if any(k in name for k in noise_keywords): continue
                         dynamic_pool[ticker] = name
-                        if len(dynamic_pool) >= 20: break
-                return dynamic_pool if dynamic_pool else {"005930": "삼성전자", "027360": "아주IB투자", "021880": "메이슨캐피탈"}
+                        if len(dynamic_pool) >= 30: break # 필터링 대비 여유 있게 수집
+                return dynamic_pool
         except:
             pass
         return {"005930": "삼성전자", "027360": "아주IB투자", "021880": "메이슨캐피탈"}
 
+    # 🔥 [중요 수정] 현재가 및 사이드카/투자경고/매매정지 상태 필터링 엔진
     def get_realtime_price(self, ticker, token):
         if not token: return None, "토큰 누락"
         url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
@@ -79,6 +81,14 @@ class KoreaInvestmentOfficialAPI:
                     if isinstance(out, list) and len(out) > 0: out = out[0]
                 
                 if isinstance(out, dict):
+                    # 🚫 사이드카, 매매정지, 단기과열, 위험종목 상태 코드 검증 (통상 '00'이 정상 공모/매매 가능)
+                    # 한투 종목 상태 분류 코드 (iscd_stat_cls_code) 기반 필터링
+                    stat_code = str(out.get("iscd_stat_cls_code", "00")).strip()
+                    
+                    # 51: 사이드카/VI발동유형, 55: 매매정지, 57: 단기과열 등 특이 코드 차단
+                    if stat_code in ["51", "52", "55", "57", "58"]: 
+                        return None, "사이드카 및 과열 매매제한 종목 제외"
+                    
                     def _clean(val):
                         if val is None or str(val).strip() == "": return 0.0
                         return float(str(val).strip().replace("-", "").replace("+", ""))
@@ -100,34 +110,39 @@ class KoreaInvestmentOfficialAPI:
             return None, f"예외: {str(e)}"
 
 # =================================================================
-# 🔄 실행 제어 로직 (안전 탈출 장치 강화)
+# 🔄 실행 제어 로직 (사이드카 제외 및 동적 바인딩)
 # =================================================================
 def run_dynamic_market_scan(api):
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     master_token = api.get_fresh_access_token()
     if not master_token:
-        st.error("🚨 한투 APP_KEY/SECRET을 확인하세요. 토큰 발급에 실패했습니다.")
+        st.error("🚨 한투 토큰 발급에 실패했습니다. Secrets 설정을 재점검하십시오.")
         return
 
-    active_pool = api.get_market_leading_tickers(master_token)
+    raw_pool = api.get_market_leading_tickers(master_token)
     
-    # 강제 세션 밀어버리기 (꼬임 원천 차단)
-    st.session_state.active_pool = active_pool
+    st.session_state.active_pool = {}
     st.session_state.market_history = {}
     st.session_state.live_pct_map = {}
     
     success_count = 0
     progress_bar = st.progress(0)
     
-    for idx, (ticker, name) in enumerate(active_pool.items()):
-        data, _ = api.get_realtime_price(ticker, master_token)
+    # 여유 있게 가져온 풀에서 사이드카 미발동 순수 정상 종목만 20개 압축 추출
+    for idx, (ticker, name) in enumerate(raw_pool.items()):
+        data, msg = api.get_realtime_price(ticker, master_token)
         if data:
             success_count += 1
             new_row = pd.DataFrame([{"Close": float(data["Close"]), "High": float(data["High"]), "Low": float(data["Low"]), "Volume": float(data["Volume"])}], index=[pd.to_datetime(current_time)])
+            
+            st.session_state.active_pool[ticker] = name
             st.session_state.live_pct_map[ticker] = float(data["PrdyCtrt"])
             st.session_state.market_history[ticker] = new_row
-        time.sleep(0.15) # 타임아웃 최소화로 고속 스캔 전환
-        progress_bar.progress((idx + 1) / len(active_pool))
+            
+            if len(st.session_state.active_pool) >= 20: 
+                break
+        time.sleep(0.15)
+        progress_bar.progress(min((idx + 1) / len(raw_pool), 1.0))
         
     progress_bar.empty()
     if success_count > 0:
@@ -136,8 +151,9 @@ def run_dynamic_market_scan(api):
 # =================================================================
 # UI 구조
 # =================================================================
-st.set_page_config(page_title="실시간 거래대금 수급 스캐너", layout="wide")
+st.set_page_config(page_title="실시간 수급 스캐너 (사이드카 방어판)", layout="wide")
 st.title("🎯 AI 장중 거래대금 상위 20선 실시간 동적 스캐너")
+st.caption("🚨 매수 사이드카 및 과열/정지 종목 실시간 자동 패스 버전")
 
 if "market_history" not in st.session_state: st.session_state.market_history = {}
 if "live_pct_map" not in st.session_state: st.session_state.live_pct_map = {}
@@ -154,11 +170,16 @@ if col_btn1.button("⚡ 현재 종목 수급 동기화", type="primary", use_con
         master_token = api.get_fresh_access_token()
         if master_token:
             for ticker in list(st.session_state.active_pool.keys()):
-                data, _ = api.get_realtime_price(ticker, master_token)
+                data, msg = api.get_realtime_price(ticker, master_token)
+                # 수급 동기화 중 사이드카 발동되면 탈락 처리
                 if data:
                     new_row = pd.DataFrame([{"Close": float(data["Close"]), "High": float(data["High"]), "Low": float(data["Low"]), "Volume": float(data["Volume"])}], index=[pd.to_datetime(current_time)])
                     st.session_state.live_pct_map[ticker] = float(data["PrdyCtrt"])
                     st.session_state.market_history[ticker] = pd.concat([st.session_state.market_history.get(ticker, pd.DataFrame()), new_row]).tail(20)
+                else:
+                    # 과열/사이드카 포착 시 풀에서 제거
+                    if ticker in st.session_state.active_pool:
+                        del st.session_state.active_pool[ticker]
             st.session_state["data_loaded"] = True
             st.rerun()
 
@@ -205,4 +226,4 @@ if st.session_state.get("data_loaded", False) and st.session_state.market_histor
             })
         st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
 else:
-    st.info("⏳ 시스템 대기 중입니다. 버튼을 눌러 실제 현재가 수집을 시작하십시오.")
+    st.info("⏳ 시스템 대기 중입니다. 버튼을 눌러 사이드카가 필터링된 청정 주도주 판세를 확인하십시오.")
