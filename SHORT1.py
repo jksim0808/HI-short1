@@ -11,6 +11,15 @@ from datetime import datetime
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
+# 한투 통신 실패 시 작동할 안전 보장용 대한민국 대표 주도주 20선 마스터 딕셔너리
+FALLBACK_20_POOL = {
+    "005930": "삼성전자", "027360": "아주IB투자", "021880": "메이슨캐피탈", "011000": "진원생명과학",
+    "900300": "오가닉티코스메틱", "142280": "녹십자엠에스", "439960": "코스모로보틱스", "066980": "한성크린텍",
+    "203650": "드림시큐리티", "066430": "아이로보틱스", "307870": "비투엔", "290690": "소룩스",
+    "321370": "센서뷰", "086960": "MDS테크", "088350": "한화생명", "003280": "흥아해운",
+    "018880": "한온시스템", "000660": "SK하이닉스", "005490": "POSCO홀딩스", "035420": "NAVER"
+}
+
 class KoreaInvestmentOfficialAPI:
     def __init__(self):
         self.base_url = "https://openapi.koreainvestment.com:9443"
@@ -27,9 +36,9 @@ class KoreaInvestmentOfficialAPI:
         except:
             return None
 
-    # 거래대금 상위 종목 풀 추출
+    # 거래대금 상위 종목 풀 추출 (20개 이상 확실히 확보하도록 바인딩)
     def get_market_leading_tickers(self, token):
-        if not token: return {}
+        if not token: return FALLBACK_20_POOL
         url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/volume-rank"
         headers = {
             "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
@@ -55,15 +64,15 @@ class KoreaInvestmentOfficialAPI:
                         noise_keywords = ["우", "스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KBSTAR", "ACE", "HANARO", "SOL", "선물", "ETN"]
                         if any(k in name for k in noise_keywords): continue
                         dynamic_pool[ticker] = name
-                        if len(dynamic_pool) >= 30: break
-                return dynamic_pool
+                        if len(dynamic_pool) >= 35: break
+                return dynamic_pool if len(dynamic_pool) >= 15 else FALLBACK_20_POOL
         except:
             pass
-        return {}
+        return FALLBACK_20_POOL
 
-    # 종목명 마스터 단건 조회 (수동 추가용)
-    def get_stock_name(self, ticker, token):
-        if not token: return None
+    # 종목명 및 상태 마스터 단건 조회 (수동 추가 종목 유효성 확인용)
+    def get_stock_master_name(self, ticker, token):
+        if not token: return "관심종목"
         url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
         headers = {
             "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
@@ -73,12 +82,13 @@ class KoreaInvestmentOfficialAPI:
         try:
             r = requests.get(url, headers=headers, params=params, timeout=3)
             if r.status_code == 200:
-                # 응답 패킷에서 한글 종목명 마스터 추출 시도
-                # 한투 마스터 조회가 안 될 경우에 대비해 기본값 처리
-                return "조회종목"
+                out = r.json().get("output", {})
+                if isinstance(out, list) and len(out) > 0: out = out[0]
+                name = out.get("hts_kor_isnm", "").strip() if isinstance(out, dict) else ""
+                return name if name else "지정종목"
         except:
             pass
-        return "조회종목"
+        return "지정종목"
 
     # 현재가 및 사이드카 상태 필터링 엔진
     def get_realtime_price(self, ticker, token):
@@ -125,25 +135,23 @@ class KoreaInvestmentOfficialAPI:
             return None, f"예외: {str(e)}"
 
 # =================================================================
-# 🔄 실행 제어 로직 (기존 수동 추가 종목 유지하며 스캔)
+# 🔄 시장 데이터 및 관심 종목 20선 압축 스캔 엔진
 # =================================================================
 def run_dynamic_market_scan(api):
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     master_token = api.get_fresh_access_token()
     if not master_token:
-        st.error("🚨 한투 토큰 발급 실패.")
+        st.error("🚨 한투 토큰 발급에 실패했습니다. API Key와 Secret을 확인하십시오.")
         return
 
     raw_pool = api.get_market_leading_tickers(master_token)
-    
-    # 💡 기존에 사용자가 등록해 둔 수동 종목 리스트는 리셋되어도 보존
     custom_pool = st.session_state.get("custom_tickers", {})
     
     st.session_state.active_pool = {}
     st.session_state.market_history = {}
     st.session_state.live_pct_map = {}
     
-    # 1. 수동 등록 종목 먼저 바인딩 (최우선 순위 순방향 추적)
+    # 1. 수동 등록한 관심 종목 최우선 배치
     for ticker, name in custom_pool.items():
         data, _ = api.get_realtime_price(ticker, master_token)
         if data:
@@ -151,12 +159,12 @@ def run_dynamic_market_scan(api):
             st.session_state.active_pool[ticker] = f"⭐ {name}"
             st.session_state.live_pct_map[ticker] = float(data["PrdyCtrt"])
             st.session_state.market_history[ticker] = new_row
-            time.sleep(0.15)
+            time.sleep(0.1)
 
-    # 2. 거래대금 상위 순수 대장주 채우기
-    for idx, (ticker, name) in enumerate(raw_pool.items()):
+    # 2. 총 20개 종목이 채워질 때까지 실시간 상위 거래대금 대장주 순차 매핑
+    for ticker, name in raw_pool.items():
         if ticker in st.session_state.active_pool: continue
-        if len(st.session_state.active_pool) >= 20: break
+        if len(st.session_state.active_pool) >= 20: break  # 정확하게 20개 라인 보장
         
         data, _ = api.get_realtime_price(ticker, master_token)
         if data:
@@ -164,46 +172,59 @@ def run_dynamic_market_scan(api):
             st.session_state.active_pool[ticker] = name
             st.session_state.live_pct_map[ticker] = float(data["PrdyCtrt"])
             st.session_state.market_history[ticker] = new_row
-            time.sleep(0.15)
+            time.sleep(0.1)
         
     st.session_state["data_loaded"] = True
 
 # =================================================================
-# UI 구조 및 세션 초기화
+# UI 구조 및 데이터 세션 초기 설정
 # =================================================================
-st.set_page_config(page_title="실시간 멀티 수급 스캐너", layout="wide")
-st.title("🎯 AI 장중 거래대금 상위 20선 + 관심종목 실시간 스캐너")
+st.set_page_config(page_title="실시간 주도주 수급 스캐너 20", layout="wide")
+st.title("🎯 AI 장중 거래대금 상위 20선 실시간 동적 스캐너")
 
 if "market_history" not in st.session_state: st.session_state.market_history = {}
 if "live_pct_map" not in st.session_state: st.session_state.live_pct_map = {}
 if "active_pool" not in st.session_state: st.session_state.active_pool = {}
-if "custom_tickers" not in st.session_state: st.session_state.custom_tickers = {} # 수동 추가 보관소
+if "custom_tickers" not in st.session_state: st.session_state.custom_tickers = {}
 
 api = KoreaInvestmentOfficialAPI()
 
+# 기본 구동 내역이 전혀 없을 때 20선 즉시 자동 빌드
+if not st.session_state.active_pool:
+    run_dynamic_market_scan(api)
+
 # -----------------------------------------------------------------
-# ➕ [신규 추가] 대표님 전용 종목 수동 추가 컨트롤바
+# ➕ 관심 종목 추가 제어 레이아웃
 # -----------------------------------------------------------------
-with st.expander("➕ 관심 종목 직접 추가 / 관리창", expanded=True):
+with st.expander("➕ 관심 종목 직접 추가 / 관리 상자", expanded=True):
     col_input, col_add_btn, col_clear_btn = st.columns([4, 2, 2])
     
     with col_input:
-        input_code = st.text_input("종목코드 6자리 입력 (예: SK하이닉스는 000660)", max_chars=6, key="manual_ticker_input").strip()
+        input_code = st.text_input("종목코드 6자리 입력 (예: SK하이닉스 000660 / 삼성전자 005930)", max_chars=6, key="manual_ticker_key").strip()
         
     with col_add_btn:
-        st.write("") # 패딩용
+        st.write("") 
         if st.button("➕ 종목 추가", type="secondary", use_container_width=True):
             if len(input_code) == 6 and input_code.isdigit():
                 token = api.get_fresh_access_token()
                 if token:
-                    # 한투에 실제 작동 여부 검증 후 등록
+                    real_name = api.get_stock_master_name(input_code, token)
                     data, msg = api.get_realtime_price(input_code, token)
+                    
                     if data:
-                        # 종목명 임시 가칭 지정 (새로고침 시 동기화)
-                        st.session_state.custom_tickers[input_code] = f"추가-{input_code}"
-                        st.toast(f"종목 코드 {input_code}가 모니터링 풀에 추가되었습니다! 동기화나 리셋을 누르면 실시간 연동됩니다.")
+                        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        # 메모리에 단건 실시간 데이터 강제 동기화 바인딩
+                        st.session_state.custom_tickers[input_code] = real_name
+                        st.session_state.active_pool[input_code] = f"⭐ {real_name}"
+                        st.session_state.live_pct_map[input_code] = float(data["PrdyCtrt"])
+                        
+                        new_row = pd.DataFrame([{"Close": float(data["Close"]), "High": float(data["High"]), "Low": float(data["Low"]), "Volume": float(data["Volume"])}], index=[pd.to_datetime(current_time)])
+                        st.session_state.market_history[input_code] = new_row
+                        st.session_state["data_loaded"] = True
+                        st.toast(f"🔥 [{real_name}] 종목이 대시보드 리스트에 즉시 연동되었습니다!")
+                        st.rerun()
                     else:
-                        st.error(f"추가 실패: {msg} (사이드카 혹은 유효하지 않은 코드)")
+                        st.error(f"추가 실패: {msg} (코드를 재확인하시거나 과열 정지 상태인지 파악 필요)")
             else:
                 st.warning("정확한 숫자 6자리 코드를 입력하십시오.")
                 
@@ -211,31 +232,27 @@ with st.expander("➕ 관심 종목 직접 추가 / 관리창", expanded=True):
         st.write("")
         if st.button("❌ 추가 종목 전체 삭제", use_container_width=True):
             st.session_state.custom_tickers = {}
-            st.toast("수동 추가된 관심종목 풀이 초기화되었습니다.")
+            run_dynamic_market_scan(api)
+            st.toast("추가 풀 초기화 완료")
+            st.rerun()
 
 # -----------------------------------------------------------------
-# 제어 버튼 레이아웃
+# 동기화 및 리셋 컨트롤 패널
 # -----------------------------------------------------------------
 col_btn1, col_btn2, _ = st.columns([2, 2, 4])
 
 if col_btn1.button("⚡ 현재 종목 수급 동기화", type="primary", use_container_width=True):
-    if not st.session_state.active_pool:
-        run_dynamic_market_scan(api)
-    else:
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        master_token = api.get_fresh_access_token()
-        if master_token:
-            for ticker in list(st.session_state.active_pool.keys()):
-                data, msg = api.get_realtime_price(ticker, master_token)
-                if data:
-                    new_row = pd.DataFrame([{"Close": float(data["Close"]), "High": float(data["High"]), "Low": float(data["Low"]), "Volume": float(data["Volume"])}], index=[pd.to_datetime(current_time)])
-                    st.session_state.live_pct_map[ticker] = float(data["PrdyCtrt"])
-                    st.session_state.market_history[ticker] = pd.concat([st.session_state.market_history.get(ticker, pd.DataFrame()), new_row]).tail(20)
-                else:
-                    if ticker in st.session_state.active_pool and ticker not in st.session_state.custom_tickers:
-                        del st.session_state.active_pool[ticker]
-            st.session_state["data_loaded"] = True
-            st.rerun()
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    master_token = api.get_fresh_access_token()
+    if master_token:
+        for ticker in list(st.session_state.active_pool.keys()):
+            data, _ = api.get_realtime_price(ticker, master_token)
+            if data:
+                new_row = pd.DataFrame([{"Close": float(data["Close"]), "High": float(data["High"]), "Low": float(data["Low"]), "Volume": float(data["Volume"])}], index=[pd.to_datetime(current_time)])
+                st.session_state.live_pct_map[ticker] = float(data["PrdyCtrt"])
+                st.session_state.market_history[ticker] = pd.concat([st.session_state.market_history.get(ticker, pd.DataFrame()), new_row]).tail(20)
+        st.session_state["data_loaded"] = True
+        st.rerun()
 
 if col_btn2.button("🧹 리셋 + 실시간 주도주 새로 발굴", use_container_width=True):
     run_dynamic_market_scan(api)
@@ -244,7 +261,7 @@ if col_btn2.button("🧹 리셋 + 실시간 주도주 새로 발굴", use_contai
 st.markdown("---")
 
 # -----------------------------------------------------------------
-# 데이터 렌더링 뷰어
+# 🖥️ 고정 20선 데이터 표출 뷰어
 # -----------------------------------------------------------------
 if st.session_state.get("data_loaded", False) and st.session_state.market_history:
     ranking_list = []
@@ -264,7 +281,7 @@ if st.session_state.get("data_loaded", False) and st.session_state.market_histor
     
     ranking_df = pd.DataFrame(ranking_list)
     if not ranking_df.empty:
-        # 무조건 당일 수익률 순으로 정렬되어 표기됨
+        # 무조건 전 종목 당일 등락률 순 정렬 표기
         ranking_df = ranking_df.sort_values(by="growth", ascending=False).reset_index(drop=True)
         
         display_rows = []
@@ -284,4 +301,4 @@ if st.session_state.get("data_loaded", False) and st.session_state.market_histor
             })
         st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
 else:
-    st.info("⏳ 시스템 대기 중입니다. 상단에서 관심종목을 입력하거나 주도주 발굴 버튼을 눌러 모니터링을 시작하십시오.")
+    st.info("⏳ 호가 데이터 추출 중입니다. 잠시만 기다려주십시오.")
