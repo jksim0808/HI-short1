@@ -19,7 +19,7 @@ BACKUP_MASTER_POOL = [
     ("015760", "한국전력"), ("004020", "현대제철"), ("011780", "금호석유"), ("010950", "S-Oil")
 ]
 
-RESTRICTED_STAT = ["51", "52", "53", "54", "58", "59"] # 투자유의/관리종목 한투 코드셋
+RESTRICTED_STAT = ["51", "52", "53", "54", "58", "59"] 
 
 # =====================================================================
 # 🛠️ 유틸리티 함수군
@@ -61,13 +61,13 @@ class RetrySession:
     def __init__(self):
         self.session = requests.Session()
 
-    def get(self, url, headers=None, params=None, timeout=2.0):
+    def get(self, url, headers=None, params=None, timeout=3.0):
         return self._request_with_retry("GET", url, headers=headers, params=params, timeout=timeout)
 
     def post(self, url, json=None, timeout=3.0):
         return self._request_with_retry("POST", url, json=json, timeout=timeout)
 
-    def _request_with_retry(self, method, url, headers=None, params=None, json=None, timeout=2.0):
+    def _request_with_retry(self, method, url, headers=None, params=None, json=None, timeout=3.0):
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -76,14 +76,14 @@ class RetrySession:
                     time.sleep(0.5)
                     continue
                 return resp
-            except (requests.ConnectionError, requests.Timeout):
+            except:
                 if attempt == max_retries - 1:
                     return None
                 time.sleep(0.5)
         return None
 
 # =====================================================================
-# 🏹 한투 API 코어 오피셜 클래스 (정밀 디버깅 로직 내장)
+# 🏹 한투 API 코어 오피셜 클래스 (시세 규격 오피셜 보정 완료)
 # =====================================================================
 class KoreaInvestmentOfficialAPI:
     def __init__(self, app_key, app_secret):
@@ -118,27 +118,31 @@ class KoreaInvestmentOfficialAPI:
                 self._token_cache = {"token": token, "expires_at": expires_at}
                 return token
             else:
-                # 🎯 한투 서버가 발급을 거절한 진짜 상세 사유 추적
                 err_code = data.get("error_code", "알 수 없음")
-                err_msg = data.get("error_description", "앱키 또는 시크릿 키 불일치")
-                st.error(f"❌ 한투 반환 에러 [{err_code}]: {err_msg}")
+                err_msg = data.get("error_description", "앱키/시크릿 키 권한 인증 실패")
+                st.error(f"❌ 한투 인증 에러 [{err_code}]: {err_msg}")
         else:
-            st.error("❌ 한투 인증 서버 통신 타임아웃 (네트워크 연결 지연)")
+            st.error("❌ 한투 인증 서버 통신 타임아웃")
         return None
-
-    def _api_get(self, url, headers, params=None):
-        resp = self.session.get(url, headers=headers, params=params, timeout=4.0)
-        return resp.json() if resp and resp.status_code == 200 else None
 
     def get_market_leading_tickers(self, token):
         url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
-        headers = {"authorization": f"Bearer {token}", "appkey": self.app_key, "appsecret": self.app_secret, "tr_id": "FHPST01710000"}
+        # 오피셜 필수 규격 헤더 전체 동기화
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {token}", 
+            "appkey": self.app_key, 
+            "appsecret": self.app_secret, 
+            "tr_id": "FHPST01710000",
+            "custtype": "P"
+        }
         params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20171", "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_SORT_CLS_CODE": "1"}
         
-        res = self._api_get(url, headers=headers, params=params)
-        if not res or "output" not in res:
+        resp = self.session.get(url, headers=headers, params=params, timeout=4.0)
+        if not resp or resp.status_code != 200:
             return BACKUP_MASTER_POOL
             
+        res = resp.json()
         output = res.get("output")
         if isinstance(output, dict):
             output = [output]
@@ -149,7 +153,6 @@ class KoreaInvestmentOfficialAPI:
         for item in output:
             ticker = extract_six_digits(item.get("mksc_shrn_iscd", ""))
             name = item.get("hts_kor_isnm", item.get("data_name", ""))
-            # 🎯 선정 기준: 현재가 10,000원 이상 필터 장치
             try:
                 price = float(item.get("stck_prpr", 0))
             except:
@@ -165,21 +168,34 @@ class KoreaInvestmentOfficialAPI:
         if not token:
             return None
         url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price"
-        headers = {"authorization": f"Bearer {token}", "appkey": self.app_key, "appsecret": self.app_secret, "tr_id": "FHPST01010000"}
+        
+        # 🎯 [핵심 수정] 시세 수신 거절을 방지하기 위해 오피셜 필수 규격 완전 결합
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {token}", 
+            "appkey": self.app_key, 
+            "appsecret": self.app_secret, 
+            "tr_id": "FHPST01010000", # 국내주식 현재가 TR 고정
+            "custtype": "P"            # 개인 고객 고정
+        }
         params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker}
         
-        res = self._api_get(url, headers=headers, params=params)
-        if not res:
-            return None
+        resp = self.session.get(url, headers=headers, params=params, timeout=3.0)
+        
+        # 만약 한투 서버가 시세 패킷을 거절했다면 원인을 추출해 화면에 인쇄하기 위한 임시 딕셔너리 생성
+        if not resp or resp.status_code != 200:
+            msg = f"HTTP {resp.status_code}" if resp else "통신 타임아웃"
+            return {"name": default_name, "Close": 0.0, "PrdyCtrt": 0.0, "Volume": 0, "is_restricted": False, "time": f"❌ 실패 ({msg})"}
             
+        res = resp.json()
         out = res.get("output") if res.get("output") else res.get("output1")
-        if not out:
-            return None
+        
+        # 한투 내부 처리 에러코드(rt_cd) 검증
+        if res.get("rt_cd") != "0" or not out:
+            msg = res.get("msg1", "한투 거절")
+            return {"name": default_name, "Close": 0.0, "PrdyCtrt": 0.0, "Volume": 0, "is_restricted": False, "time": f"❌ {msg[:10]}"}
             
         close_p = safe_float(out.get("stck_prpr", 0))
-        if close_p == 0.0:
-            return None
-            
         stat_code = str(out.get("iscd_stat_cls_code", "00")).strip()
         name = out.get("hts_kor_isnm", "") if out.get("hts_kor_isnm") else default_name
         
@@ -199,6 +215,8 @@ class KoreaInvestmentOfficialAPI:
 # =====================================================================
 if "engine_cache" not in st.session_state:
     st.session_state.engine_cache = {}
+if "last_pool" not in st.session_state:
+    st.session_state.last_pool = BACKUP_MASTER_POOL
 
 st.title("🎯 AI 실시간 고안정성 주도주 스캐너 (10,000원↑)")
 
@@ -208,8 +226,9 @@ if st.button("🔄 즉시 마켓 시세 스캔 및 갱신", type="primary", use_
         token = api.get_fresh_access_token()
         if token:
             tickers = api.get_market_leading_tickers(token)
+            st.session_state.last_pool = tickers
             for idx, (t, n) in enumerate(tickers[:20]):
-                time.sleep(0.1) # 패킷 거절 방지 미세 시차 분사
+                time.sleep(0.15) # 한투 초당 5건 요청 과부하 회피용 안전 시차 늘림
                 data = api.get_realtime_price(t, token, default_name=n)
                 if data:
                     st.session_state.engine_cache[t] = data
@@ -217,16 +236,18 @@ if st.button("🔄 즉시 마켓 시세 스캔 및 갱신", type="primary", use_
 
 # 화면 출력 테이블 렌더링
 display_list = []
-for t, n in BACKUP_MASTER_POOL:
+for t, n in st.session_state.last_pool[:20]:
     c = st.session_state.engine_cache.get(t, {})
+    close_val = c.get("Close", 0.0)
+    
     display_list.append({
-        "종목코드": t, "종목명": c.get("name", n),
-        "현재가": f"{int(c['Close']):,}원" if c.get("Close") else "대기중",
-        "등락률": f"{c.get('PrdyCtrt', 0.0):+.2f}%" if c.get("PrdyCtrt") else "0.00%",
+        "종목코드": t, 
+        "종목명": c.get("name", n),
+        "현재가": f"{int(close_val):,}원" if close_val > 0 else c.get("time", "대기중"),
+        "등락률": f"{c.get('PrdyCtrt', 0.0):+.2f}%" if close_val > 0 else "0.00%",
         "거래량": f"{int(c['Volume']):,}주" if c.get("Volume") else "-",
         "유의종목여부": "⚠️ 투자유의" if c.get("is_restricted") else "🟢 정상",
-        "동기화시각": c.get("time", "-")
+        "동기화상태": c.get("time", "-")
     })
 
-# 시원하게 20개 종목이 한눈에 들어오는 가시성 고정 레이아웃
 st.dataframe(pd.DataFrame(display_list), use_container_width=True, hide_index=True, height=750)
