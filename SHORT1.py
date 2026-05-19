@@ -83,14 +83,18 @@ class KoreaInvestmentAPI:
                     
                 res_data = res_json.get("output", {})
                 if res_data and res_data.get("stck_prpr"):
+                    # 음수 기호(-)나 부호 제거 후 순수 숫자 파싱
                     current_price = float(str(res_data.get("stck_prpr")).strip().replace("-", "").replace("+", ""))
                     high_price = float(str(res_data.get("stck_hgpr", current_price)).strip().replace("-", "").replace("+", ""))
                     low_price = float(str(res_data.get("stck_lwpr", current_price)).strip().replace("-", "").replace("+", ""))
-                    volume = float(str(res_data.get("accl_tr_vol", 0)).strip())
+                    
+                    # 거래량이 0이거나 비어있어도 에러내지 않고 최소 1.0 주입 (안전장치)
+                    raw_vol = str(res_data.get("accl_tr_vol", "1.0")).strip()
+                    volume = float(raw_vol) if raw_vol and raw_vol != "0" else 1.0
                     
                     return {
                         "Close": current_price, "High": high_price, "Low": low_price,
-                        "Volume": volume if volume > 0 else 10.0, "Source": "한투 실시간 시세"
+                        "Volume": volume, "Source": "한투 실시간 시세"
                     }
             st.session_state.last_api_error = f"🚨 [HTTP 에러] {response.status_code}"
             return None
@@ -182,13 +186,13 @@ if not APP_KEY or not APP_SECRET:
 api = KoreaInvestmentAPI()
 current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-# 🔥 사용자가 버튼을 클릭한 순간 즉시 루프를 돌려 한투 데이터를 강제로 세션에 주입
 if click_refresh:
     st.session_state.last_api_error = None
     for ticker in st.session_state.custom_stock_pool:
         live_tick = api.get_realtime_price(ticker)
+        
+        # 거래량 방어막 통과 후 정상 시세가 잡힌 경우에만 주입
         if live_tick and live_tick["Close"] > 0:
-            # 기존 데이터가 없다면 기본 프레임 생성
             if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
                 init_rows = []
                 init_times = []
@@ -196,18 +200,16 @@ if click_refresh:
                 for i in range(5, 0, -1):
                     time_str = (datetime.now() - timedelta(minutes=i)).strftime('%Y-%m-%d %H:%M:%S')
                     init_times.append(pd.to_datetime(time_str))
-                    init_rows.append({"Close": base_p, "High": base_p, "Low": base_p, "Volume": 100.0})
+                    init_rows.append({"Close": base_p, "High": base_p, "Low": base_p, "Volume": live_tick["Volume"]})
                 st.session_state.multi_market_data[ticker] = pd.DataFrame(init_rows, index=init_times)
             
-            # 실시간 새 데이터 누적 결합
             new_df = pd.DataFrame([{"Close": live_tick["Close"], "High": live_tick["High"], "Low": live_tick["Low"], "Volume": live_tick["Volume"]}], index=[pd.to_datetime(current_time_str)])
             st.session_state.multi_market_data[ticker] = pd.concat([st.session_state.multi_market_data[ticker], new_df])
             st.session_state.multi_market_data[ticker] = st.session_state.multi_market_data[ticker].loc[~st.session_state.multi_market_data[ticker].index.duplicated(keep='last')].tail(15)
 
-# 화면에 뿌려줄 데이터 구조 최종 빌드 단계
+# 화면 출력용 데이터 취합
 summary_rows = []
 for ticker in st.session_state.custom_stock_pool:
-    # 캐시에 아직 아무것도 없을 때만 초기 대기 가짜 기본틀 생성
     if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
         init_rows = []
         init_times = []
@@ -244,7 +246,6 @@ st.markdown("---")
 if summary_rows:
     summary_df = pd.DataFrame(summary_rows).sort_values(by=['신호가중치', '실시간거래대금'], ascending=[True, False]).reset_index(drop=True)
     
-    # 버튼을 누른 순간 매수 신호가 잡히면 벨소리 재생
     if click_refresh and not summary_df[summary_df["신호가중치"] == 0].empty:
         st.audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg") 
 
