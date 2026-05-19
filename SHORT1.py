@@ -30,7 +30,7 @@ with col1:
     st.markdown(
         """
         1. **리얼타임 시장 동적 연동**: 고정된 종목이 아니라, 버튼을 누르는 순간 한국투자증권 서버에서 당일 거래대금이 가장 많이 터진 최상위 순서대로 종목을 소싱합니다.
-        2. **만 원 미만 잡주 및 금융노이즈 차단**: 단타 매매 시 똥주에 물리는 것을 막기 위해 현재가 10,000원 이상 우량주만 선별하며, ETF/스팩/인버스/레버리지 등은 자동으로 100% 걸러냅니다.
+        2. **초저가 잡주 및 금융노이즈 차단**: 단타 매매 시 리스크가 큰 동전주를 막기 위해 현재가 2,000원 이상 종목만 선별하며, ETF/스팩/인버스/레버리지 등은 자동으로 100% 걸러냅니다.
         3. **연타 방지 보안 캐시**: 장중 새로고침 버튼을 연속으로 난타해도 이미 발급된 안전 토큰을 메모리에서 재사용하므로 한투 서버로부터의 IP 차단 및 토큰 에러를 원천 봉쇄합니다.
         """
     )
@@ -84,12 +84,11 @@ class HantuSyncEngine:
 
     def fetch_market_pool(self, token):
         pool = []
-        # 🛠️ [엔진 수정] 단순 거래량 순위가 아닌 진짜 돈이 몰리는 '거래대금 순위' API로 교체
         url_vol = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
         headers_vol = {
             "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
             "appkey": APP_KEY, "appsecret": APP_SECRET, 
-            "tr_id": "FHPST01710000", # 동일 API 내에서 파라미터 제어
+            "tr_id": "FHPST01710000",
             "custtype": "P"
         }
         params_vol = {
@@ -97,7 +96,7 @@ class HantuSyncEngine:
             "FID_COND_SCR_DIV_CODE": "20171",
             "FID_INPUT_ISCD": "0000", 
             "FID_DIV_CLS_CODE": "0", 
-            "FID_SORT_CLS_CODE": "3" # 🛠️ [엔진 수정] 기존 '2(거래량순)'에서 '3(거래대금순)'으로 변경하여 삼성전자 소싱 보장
+            "FID_SORT_CLS_CODE": "3" # 거래대금순 정렬 적용
         }
         try:
             r = self.session.get(url_vol, headers=headers_vol, params=params_vol, timeout=4.0)
@@ -109,12 +108,11 @@ class HantuSyncEngine:
                     try: price = float(item.get("stck_prpr", 0))
                     except: price = 0
                     
-                    if ticker.isdigit() and name and name != "None" and price >= 10000:
-                        # 🛠️ [노이즈 필터 수정] 이름 중간에 '우'가 들어간 정상 우량주(예: 삼성전자)는 살리고, 실제 우선주만 정교하게 차단
+                    # 🛠️ [조건 완화] 최소 가격 제한을 10,000원에서 2,000원으로 낮춤 (알짜 테마주 소싱 허용)
+                    if ticker.isdigit() and name and name != "None" and price >= 2000:
                         if any(k in name for k in ["스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF", "SOL", "ACE", "HANARO"]): 
                             continue
                         
-                        # 종목명이 '우'로 끝나거나 '우' 뒤에 우선주 등급번호가 붙는 경우만 필터링
                         if name.endswith("우") or any(name.endswith(f"우{suffix}") for suffix in ["B", "C", " 우선주", "1", "2", "3"]):
                             continue
                             
