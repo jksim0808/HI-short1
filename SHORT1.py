@@ -24,7 +24,7 @@ if "engine_cache" not in st.session_state: st.session_state.engine_cache = {}
 if "last_pool" not in st.session_state: st.session_state.last_pool = BACKUP_MASTER_POOL
 
 # =====================================================================
-# ⚡ 초고속 비동기 데이터 통신 엔진 (httpx 기반 구조 전환)
+# ⚡ 초고속 비동기 데이터 통신 엔진
 # =====================================================================
 async def fetch_token_async(client):
     url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
@@ -39,7 +39,6 @@ async def fetch_market_pool_async(client, token):
         "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
         "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01710000", "custtype": "P"
     }
-    # 명세서 기준 가상 필터 파라미터 완전 매핑
     params = {
         "FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20171",
         "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_SORT_CLS_CODE": "1"
@@ -92,14 +91,12 @@ async def run_async_pipeline():
     async with httpx.AsyncClient(limits=limits) as client:
         token = await fetch_token_async(client)
         if not token:
-            st.session_state["token_error"] = "토큰 발급 실패 (키 또는 계정 권한 문제)"
+            st.session_state["token_error"] = "토큰 발급 실패 (키 오염 또는 계정 권한 점검 요망)"
             return
             
-        # 1. 상위 수급 주도주 풀 동적 확보
         dynamic_pool = await fetch_market_pool_async(client, token)
         st.session_state.last_pool = dynamic_pool
         
-        # 2. 비동기 쪼개기 분사 방식을 통한 고속 시세 수집
         tasks = []
         for idx, (t, n) in enumerate(dynamic_pool[:20]):
             tasks.append(fetch_single_price_async(client, token, t, n, idx * 0.15))
@@ -109,7 +106,7 @@ async def run_async_pipeline():
             st.session_state.engine_cache[res["ticker"]] = res
 
 # =====================================================================
-# 🖥️ 깔끔한 UI 단독 렌더링 파트 (Columns 레이아웃 배제)
+# 🖥️ 깔끔한 UI 단독 렌더링 파트
 # =====================================================================
 st.title("🎯 AI 실시간 고안정성 주도주 스캐너 (10,000원↑)")
 
@@ -118,7 +115,8 @@ if st.button("🔄 즉시 마켓 시세 스캔 및 갱신", type="primary", use_
     with st.spinner("한투 오피셜 커넥터 가동 중..."):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(run_scanner_pipeline())
+        # 🎯 [오타 수정 완료] 명칭을 run_async_pipeline으로 정확히 일치시켰습니다.
+        loop.run_until_complete(run_async_pipeline())
         loop.close()
     st.rerun()
 
@@ -131,13 +129,12 @@ for t, n in st.session_state.last_pool[:20]:
     c = st.session_state.engine_cache.get(t, {})
     price_val = c.get("price", 0)
     
-    # 에러 및 수신 상태 분기 정밀 렌더링
     if price_val == -1:
         current_price_str = "❌ 통신 오류"
     elif price_val > 0:
         current_price_str = f"{int(price_val):,}원"
     else:
-        current_price_str = "대기중 (새로고침 요망)"
+        current_price_str = "대기중 (위 갱신 버튼을 눌러주세요)"
 
     display_list.append({
         "종목코드": t,
@@ -149,5 +146,4 @@ for t, n in st.session_state.last_pool[:20]:
         "갱신시각": c.get("time", "-")
     })
 
-# 시원하게 아래로 길게 떨어지는 고정형 테이블 출력
 st.dataframe(pd.DataFrame(display_list), use_container_width=True, hide_index=True, height=750)
