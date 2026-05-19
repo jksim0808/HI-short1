@@ -5,7 +5,13 @@ import httpx
 from datetime import datetime
 
 # =================================================================
-# 🔑 환경설정
+# ⚙️ [최우선 배치] Streamlit 페이지 설정 (에러 방지의 핵심)
+# =================================================================
+# 모든 UI 관련 함수(columns, title 등)보다 무조건 이 코드가 맨 위에 와야 에러가 안 납니다.
+st.set_page_config(page_title="주도주 스캐너", layout="wide")
+
+# =================================================================
+# 🔑 환경설정 및 비밀키 결합
 # =================================================================
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
@@ -70,12 +76,11 @@ async def run_scanner():
             if res: st.session_state.price_cache[res["ticker"]] = res
 
 # =================================================================
-# 🖥️ 화면 출력부
+# 🖥️ 화면 출력부 (순서 정밀 교정)
 # =================================================================
-st.set_page_config(page_title="주도주 스캐너", layout="wide")
 st.title("🎯 10,000원 이상 우량 주도주 실시간 스캐너")
 
-# 🎯 [오류 해결 부근] 정수 배수 및 독립 선언으로 문법 충돌 차단
+# columns 튕김을 방지하기 위해 정수형 변수로 확실히 대입
 col_ctrl, col_info = st.columns(2)
 
 with col_ctrl:
