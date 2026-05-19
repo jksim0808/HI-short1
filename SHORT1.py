@@ -10,7 +10,6 @@ from datetime import datetime
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
-# 만 원 이상 우량 주도주 백업 풀
 BACKUP_MASTER_POOL = [
     ("005930", "삼성전자"), ("000660", "SK하이닉스"), ("005380", "현대차"), ("000270", "기아"),
     ("068270", "셀트리온"), ("035420", "NAVER"), ("005490", "POSCO홀딩스"), ("051910", "LG화학"),
@@ -22,9 +21,6 @@ BACKUP_MASTER_POOL = [
 if "price_cache" not in st.session_state: st.session_state.price_cache = {}
 if "active_pool" not in st.session_state: st.session_state.active_pool = {}
 
-# =================================================================
-# 🚀 API 통신 엔진
-# =================================================================
 async def fetch_token_async(client):
     url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
     data = {"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}
@@ -68,21 +64,13 @@ async def update_all_prices():
     async with httpx.AsyncClient() as client:
         token = await fetch_token_async(client)
         if not token: return
-        
-        # 종목풀 확보
         pool = await fetch_volume_rank_async(client, token)
         st.session_state.active_pool = {t: n for t, n in pool}
-        
-        # 0.1초 간격으로 서버 과부하 방지
         tasks = [fetch_single_price(client, token, t, n, i*0.1) for i, (t, n) in enumerate(pool)]
         results = await asyncio.gather(*tasks)
-        
         for res in results:
             if res: st.session_state.price_cache[res["ticker"]] = res
 
-# =================================================================
-# 🖥️ 화면 출력
-# =================================================================
 st.set_page_config(page_title="주도주 스캐너", layout="wide")
 st.title("🎯 만 원 이상 우량 주도주 실시간 스캐너")
 
@@ -96,10 +84,14 @@ if st.button("🔄 실시간 시세 갱신"):
 
 display_data = []
 for ticker, name in st.session_state.active_pool.items():
-    c = st.session_state.price_cache.get(ticker, {"price": 0, "ctrt": 0.0, "volume": 0, "time": "수신대기"})
+    c = st.session_state.price_cache.get(ticker, {"price": 0, "ctrt": 0.0, "volume": 0, "time": "대기중"})
     display_data.append({
-        "순위": len(display_data)+1, "종목명": name, "현재가": f"{int(c['price']):,}원",
-        "등락률": f"{c['ctrt']:+.2f}%", "거래량": f"{int(c['volume']):,}주", "최근시각": c['time']
+        "순위": len(display_data)+1, 
+        "종목명": name, 
+        "현재가": f"{int(c.get('price', 0)):,}원",
+        "등락률": f"{c.get('ctrt', 0.0):+.2f}%", 
+        "거래량": f"{int(c.get('volume', 0)):,}주", 
+        "최근시각": c.get('time', '대기중')
     })
 
 st.dataframe(pd.DataFrame(display_data), use_container_width=True, hide_index=True)
