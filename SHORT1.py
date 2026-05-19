@@ -2,8 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-import random
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # =================================================================
 # 🔑 Streamlit Secrets 금고 연동
@@ -12,19 +11,18 @@ APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
 # =================================================================
-# 🏦 한투 실전투자 전용 초정밀 파싱 엔진 (시장 분류 코드 자동 스위칭)
+# 🏦 한투 실전투자 전용 파싱 엔진 (가상 데이터 완전 제거 / 토큰 강제 갱신)
 # =================================================================
 class KoreaInvestmentOfficialAPI:
     def __init__(self):
+        # 🎯 오직 한투 실전투자 운영 서버 주소만 사용
         self.base_url = "https://openapi.koreainvestment.com:9443"
         self.app_key = APP_KEY
         self.app_secret = APP_SECRET
         self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
-    def get_access_token(self):
-        if "api_access_token" in st.session_state and datetime.now() < st.session_state.get("token_expire_time", datetime.min):
-            return st.session_state.api_access_token
-            
+    def get_fresh_access_token(self):
+        """ 🎯 [핵심 수정] 캐시된 토큰을 쓰지 않고, 호출할 때마다 한투 서버에서 새 토큰을 즉시 강제 발급 """
         try:
             url = f"{self.base_url}/oauth2/tokenP"
             headers = {"content-type": "application/json; charset=UTF-8", "User-Agent": self.user_agent}
@@ -34,21 +32,20 @@ class KoreaInvestmentOfficialAPI:
             j = r.json()
             token = j.get("access_token")
             if token:
-                st.session_state.api_access_token = token
-                st.session_state.token_expire_time = datetime.now() + timedelta(seconds=70000)
-            return token
+                return token
         except:
-            return None
+            pass
+        return None
 
     def get_realtime_price(self, ticker):
-        token = self.get_access_token()
+        # 1. 매 호출마다 무조건 싱싱한 토큰 수령
+        token = self.get_fresh_access_token()
         if not token:
-            return None
+            return None  # 가상 데이터 반환 없이 통신 실패 처리
             
         url = f"{self.base_url}/uapi/domestic-stock/v1/quoting/inquire-price"
         
-        # 🎯 [정밀 보정 1] 종목별 시장 분류 코드 분기 처리 (코스닥 및 주요 주도주 예외 방지)
-        # 한미반도체(042700), 파두(043200), 에이직랜드(422340) 등 코스닥 및 특정 섹터 자동 대응
+        # 코스닥 및 주요 종목 구분용 딕셔너리 정밀 세팅
         kosdaq_tickers = ["422340", "043200", "086520", "247540", "068270", "035420", "035720", "000990", "042700", "322890", "108320", "213420", "054780", "018250", "028300"]
         market_div = "Y" if ticker in kosdaq_tickers else "J"
         
@@ -71,7 +68,6 @@ class KoreaInvestmentOfficialAPI:
                 if isinstance(out1, list) and len(out1) > 0: 
                     out1 = out1[0]
                 
-                # 🎯 [정밀 보정 2] 한투 실전 데이터 원천 파싱 및 클렌징 수강
                 if isinstance(out1, dict) and "stck_prpr" in out1:
                     def _clean(val):
                         if not val: return 0.0
@@ -79,6 +75,7 @@ class KoreaInvestmentOfficialAPI:
                     
                     close_val = _clean(out1.get("stck_prpr"))
                     
+                    # 🎯 오직 실전 한투 원본 데이터 세트만 딕셔너리로 빌드
                     if close_val > 0:
                         return {
                             "Close": close_val,
@@ -89,7 +86,7 @@ class KoreaInvestmentOfficialAPI:
                         }
         except:
             pass
-        return None
+        return None  # 통신 끊기면 가상 가짜값 없이 철저히 정지
 
 # =================================================================
 # 🧠 AI 당일 주도주 대상 종목 (정확히 20개 매핑)
@@ -108,8 +105,8 @@ def get_ai_lead_stocks():
 # =================================================================
 st.set_page_config(page_title="AI 주도주 실시간 단타 스캐너", layout="wide")
 
-st.title("🎯 AI 주도주 20선 실시간 단타 스캐너 (⚡ 실시간 완전 동기화판)")
-st.caption(f" 가동 시점: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 한투 실전 다이렉트 패킷 수신 중")
+st.title("🎯 AI 주도주 20선 실시간 단타 스캐너 (🔒 실전서버 100% 직통판)")
+st.caption(f" 가동 시점: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 한투 원본 패킷 강제 수신 시스템")
 
 if "market_history" not in st.session_state:
     st.session_state.market_history = {}
@@ -121,10 +118,9 @@ master_pool = get_ai_lead_stocks()
 
 col_btn1, col_btn2, col_info = st.columns([1, 1, 3])
 
-if col_btn1.button("⚡ AI 실시간 주도주 수급 동기화", type="primary", use_container_width=True, key="btn_sync_real_absolute"):
+if col_btn1.button("⚡ AI 실시간 주도주 수급 동기화", type="primary", use_container_width=True, key="btn_sync_pure_real"):
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # 임시 저장소 확보
     temp_history = {}
     temp_pct = {}
     success_count = 0
@@ -132,7 +128,7 @@ if col_btn1.button("⚡ AI 실시간 주도주 수급 동기화", type="primary"
     for ticker, name in master_pool.items():
         data = api.get_realtime_price(ticker)
         
-        # 실전 데이터가 정상적으로 수신된 경우에만 바인딩
+        # 🎯 가상 데이터 우회 없이, 오직 한투 정식 데이터만 허용
         if data and data["Close"] > 0:
             success_count += 1
             new_row = pd.DataFrame([{
@@ -145,28 +141,22 @@ if col_btn1.button("⚡ AI 실시간 주도주 수급 동기화", type="primary"
                 temp_history[ticker] = new_row
             else:
                 temp_history[ticker] = pd.concat([st.session_state.market_history[ticker], new_row]).tail(20)
-        else:
-            # 실패 시 기존 세션 유지 (화면 멈춤 방지)
-            if ticker in st.session_state.market_history:
-                temp_history[ticker] = st.session_state.market_history[ticker]
-            if ticker in st.session_state.live_pct_map:
-                temp_pct[ticker] = st.session_state.live_pct_map[ticker]
 
-    # 세션 상태에 최종 덮어쓰기
+    # 🎯 20개 종목 중 실제 한투 데이터가 단 1개라도 받아졌을 때만 갱신 작동
     if success_count > 0:
         st.session_state.market_history.update(temp_history)
         st.session_state.live_pct_map.update(temp_pct)
         st.session_state["data_loaded"] = True
     else:
-        st.error("🚨 한투 API 실시간 데이터 응답에 실패했습니다. Secrets 설정(AppKey/Secret) 및 장중 시간을 확인해 주십시오.")
+        st.error("🚨 [인증 실패] 한투 서버가 실시간 토큰 발급을 거부했습니다. Streamlit Secrets에 저장된 AppKey와 Secret 값에 공백이 있는지 반드시 확인이 필요합니다.")
 
-if col_btn2.button("🧹 단타 캐시 리셋", use_container_width=True, key="btn_reset_real_absolute"):
+if col_btn2.button("🧹 단타 캐시 리셋", use_container_width=True, key="btn_reset_pure_real"):
     st.session_state.market_history = {}
     st.session_state.live_pct_map = {}
     if "data_loaded" in st.session_state: del st.session_state["data_loaded"]
     st.rerun()
 
-col_info.markdown("💡 **알림:** 현재 시장 코드 자동 분기 엔진이 작동 중입니다. 버튼 클릭 시 실시간 체결 데이터가 원본 그대로 화면에 투사됩니다.")
+col_info.markdown("⚠️ **경고:** 본 시스템은 가상 데이터를 완벽 차단했습니다. 한투 실전 API 통신이 성공해야만 화면이 갱신됩니다.")
 
 st.markdown("---")
 
@@ -194,7 +184,6 @@ if st.session_state.get("data_loaded", False) and st.session_state.market_histor
     ranking_df = pd.DataFrame(ranking_list)
     
     if not ranking_df.empty:
-        # HTS 등락률 순 정렬 완벽 매칭
         ranking_df = ranking_df.sort_values(by="growth", ascending=False).reset_index(drop=True)
         
         st.subheader("🔥 AI 선정 실시간 단타 주도주 순위 Top 20")
@@ -223,8 +212,8 @@ if st.session_state.get("data_loaded", False) and st.session_state.market_histor
                 sig_text = "🔥 매수추천" if row.growth > 3.0 else "🟢 관망유지"
                 st.markdown(f"### {row.name}")
                 st.markdown(f"**코드:** `{row.code}` | **등락:** `{row.growth:+.2f}%`")
-                st.metric(label="실시간 현재가", value=f"{row.price:,}원", delta=f"평균차: {int(row.price - row.vwap):+}원")
+                st.metric(label="현재 가격", value=f"{row.price:,}원", delta=f"평균차: {int(row.price - row.vwap):+}원")
                 st.caption(f"⚡ 시그널: `{sig_text}`")
                 st.markdown("---")
 else:
-    st.info("⚡ 대시보드가 수급 신호를 대기 중입니다. 상단의 **'⚡ AI 실시간 주도주 수급 동기화'** 버튼을 누르시면 정밀 파싱된 원본 호가가 투사됩니다.")
+    st.info("⚡ 한투 실전 서버 접속 준비 완료. 상단의 **'⚡ AI 실시간 주도주 수급 동기화'** 버튼을 클릭하시면 100% 원본 데이터 연동이 시작됩니다.")
