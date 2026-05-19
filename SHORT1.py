@@ -9,11 +9,11 @@ from datetime import datetime, timedelta
 # =================================================================
 # 🔑 [실전투자 계좌 설정] Streamlit Secrets 내부 금고 연동
 # =================================================================
-APP_KEY = st.secrets.get("HANTU_APP_KEY", "YOUR_APP_KEY")
-APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "YOUR_APP_SECRET")
+APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
+APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
 # =================================================================
-# 🏦 한국투자증권 실전 API 전용 정밀 통신 엔진
+# 🏦 한국투자증권 실전 API 전용 정밀 통신 엔진 (진단기 탑재)
 # =================================================================
 class KoreaInvestmentAPI:
     def __init__(self):
@@ -31,7 +31,7 @@ class KoreaInvestmentAPI:
         self.session.mount("https://", adapter)
 
     def get_access_token(self):
-        """ 토큰 안전 재사용 모듈 (12시간 동안 한투 토큰 서버 요청 원천 봉쇄) """
+        """ [진단 기능] 토큰 발급 단계에서 한투가 거절하면 에러를 즉시 화면에 박아버립니다. """
         if "api_access_token" in st.session_state and st.session_state.api_access_token:
             if "token_expire_time" in st.session_state and datetime.now() < st.session_state.token_expire_time:
                 return st.session_state.api_access_token
@@ -42,18 +42,24 @@ class KoreaInvestmentAPI:
             data = {"grant_type": "client_credentials", "appkey": self.app_key, "appsecret": self.app_secret}
             
             response = self.session.post(url, headers=headers, json=data, timeout=4.0)
+            res_json = response.json()
+            
             if response.status_code == 200:
-                res_json = response.json()
                 token = res_json.get("access_token")
                 if token:
                     st.session_state.api_access_token = token
                     st.session_state.token_expire_time = datetime.now() + timedelta(hours=12)
                     return token
+            
+            # 토큰 발급 실패 시 한투 날것의 에러 메시지 노출
+            st.session_state.last_api_error = f"🚨 [토큰 발급 실패] 한투 응답: {res_json}"
             return None
-        except:
+        except Exception as e:
+            st.session_state.last_api_error = f"💥 [토큰 네트워크 오류] {str(e)}"
             return None
 
     def get_realtime_price(self, ticker):
+        """ [진단 기능] 시세 조회 단계에서 한투가 거절하면 거절 사유를 실시간 파싱합니다. """
         access_token = self.get_access_token()
         if not access_token:
             return None
@@ -72,8 +78,14 @@ class KoreaInvestmentAPI:
         
         try:
             response = self.session.get(url, headers=headers, params=params, timeout=3.0)
+            res_json = response.json()
+            
             if response.status_code == 200:
-                res_json = response.json()
+                # 한투 응답 성공 가부 확인 (rt_cd 가 0이 아니면 에러)
+                if res_json.get("rt_cd", "0") != "0":
+                    st.session_state.last_api_error = f"🚨 [시세 조회 실패] 코드({ticker}) 한투 응답: {res_json.get('msg1') or res_json}"
+                    return None
+                    
                 res_data = res_json.get("output", {})
                 if res_data and res_data.get("stck_prpr"):
                     current_price = float(str(res_data.get("stck_prpr")).strip().replace("-", "").replace("+", ""))
@@ -88,8 +100,11 @@ class KoreaInvestmentAPI:
                         "Close": current_price, "High": high_price, "Low": low_price,
                         "Volume": volume if volume > 0 else 10.0, "Source": "한투 실시간 시세"
                     }
+            
+            st.session_state.last_api_error = f"🚨 [시세 HTTP 오류] 상태코드: {response.status_code} 내용: {res_json}"
             return None
-        except:
+        except Exception as e:
+            st.session_state.last_api_error = f"💥 [시세 통신 예외 오류] {str(e)}"
             return None
 
 # =================================================================
@@ -148,6 +163,10 @@ if "custom_stock_pool" not in st.session_state:
 if "multi_market_data" not in st.session_state:
     st.session_state.multi_market_data = {}
 
+# 진단용 오류 저장소 초기화
+if "last_api_error" not in st.session_state:
+    st.session_state.last_api_error = None
+
 st.sidebar.markdown("### 📋 종목 관리")
 raw_input_tickers = st.sidebar.text_area("종목코드 입력", placeholder="예: 005930", height=70)
 if st.sidebar.button("⚡ 종목 등록", use_container_width=True):
@@ -157,18 +176,29 @@ if st.sidebar.button("⚡ 종목 등록", use_container_width=True):
             st.session_state.custom_stock_pool = list(set(st.session_state.custom_stock_pool + clean_tickers))
             st.rerun()
 
-st.markdown("### 🏹 실전 수급 돌파 스캐너 (수동 조회 모드)")
+st.markdown("### 🏹 실전 수급 돌파 스캐너 (X-Ray 진단 모드)")
 st.caption(f"💡 현재 화면 데이터 시점: {datetime.now().strftime('%H:%M:%S')}")
 
 # =================================================================
-# 🛠️ 수동 제어용 메인 컨트롤러
+# 🕵️‍♂️ [실시간 블랙박스 시스템 판넬] 
 # =================================================================
+if st.session_state.last_api_error:
+    st.error(st.session_state.last_api_error)
+else:
+    st.info("🟢 통신 장비 상태: 특이사항 없음 (정상 대기)")
+
 col_btn1, col_btn2 = st.columns(2)
 if col_btn1.button("🔥 [클릭] 한투 실시간 시세 조회/갱신", type="primary", use_container_width=True):
+    st.session_state.last_api_error = None  # 누를 때마다 이전 에러 기록 청소 후 재시도
     st.rerun()
 if col_btn2.button("🧹 데이터 초기화 (캐시 청소)", use_container_width=True):
     st.session_state.multi_market_data = {}
+    st.session_state.last_api_error = None
     st.rerun()
+
+# 비밀키 누락 점검 안전장치
+if not APP_KEY or not APP_SECRET:
+    st.warning("⚠️ Streamlit Secrets 보관함에 HANTU_APP_KEY 또는 HANTU_APP_SECRET 설정이 누락되었거나 비어있습니다.")
 
 api = KoreaInvestmentAPI()
 current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
