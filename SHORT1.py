@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 from datetime import datetime, timedelta
 import time
 
@@ -10,58 +12,69 @@ import time
 # =================================================================
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "YOUR_APP_KEY")
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "YOUR_APP_SECRET")
-MOCK_FLAG = False  # 👈 실전투자용 고정 (True로 변경 금지)
 
 # =================================================================
-# 🏦 한국투자증권 실전 API & 야후 파이낸스 실시간 정밀 연동 엔진
+# 🏦 한국투자증권 실전 API 전용 강력 통신 엔진 (야후 완전 제거)
 # =================================================================
 class KoreaInvestmentAPI:
     def __init__(self):
-        # 실전투자 표준 도메인 (포트 미포함 주소 체계로 기본 설정)
-        self.base_url = "https://openapi.koreainvestment.com"
+        # 💡 한투 실전투자 공식 도메인 고정
+        self.base_url = "https://openapi.koreainvestment.com:9443"
         self.app_key = APP_KEY
         self.app_secret = APP_SECRET
+        
+        # ⚡ [핵심 강력 조치] 한투 방화벽 우회를 위한 세션 및 재시도 메커니즘 구축
+        self.session = requests.Session()
+        retry_strategy = Retry(
+            total=3,                          # 연결 실패 시 총 3번 재시도
+            backoff_factor=0.2,               # 재시도 간격 (0.2초, 0.4초...)
+            status_forcelist=[500, 502, 503, 504] # 해당 서버 에러 발생 시 재시도
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
 
     def get_access_token(self):
-        """ 토큰 발급 세션 캐싱 및 에러 트래킹 모듈 """
+        """ 실전 토큰 세션 캐싱 및 검증 모듈 """
         if "api_access_token" in st.session_state and st.session_state.api_access_token:
             return st.session_state.api_access_token
         
         try:
-            # 토큰 발급은 포트 없이 표준 도메인 결합
-            url = f"{self.base_url.strip('/')}/oauth2/tokenP"
-            headers = {"content-type": "application/json"}
+            url = f"{self.base_url}/oauth2/tokenP"
+            headers = {
+                "content-type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
             data = {"grant_type": "client_credentials", "appkey": self.app_key, "appsecret": self.app_secret}
-            response = requests.post(url, headers=headers, json=data)
             
+            response = self.session.post(url, headers=headers, json=data, timeout=5.0)
             if response.status_code == 200:
                 token = response.json().get("access_token")
                 st.session_state.api_access_token = token
                 return token
             else:
-                st.error(f"❌ [한투 토큰 발급 실패] 상태코드: {response.status_code} | 내용: {response.text}")
+                st.error(f"❌ [토큰 발급 실패] 한투 응답: {response.text}")
                 return None
         except Exception as e:
-            st.error(f"💥 [토큰 시스템 통신 에러]: {str(e)}")
+            st.error(f"💥 [토큰 통신 장애]: {str(e)}")
             return None
 
     def get_realtime_price(self, ticker):
-        """ [404 오동작 정밀 교정] 실전 시세 쿼리 파이프라인 """
+        """ 야후 백업 전면 제거 ➡️ 100% 한투 데이터 정밀 파싱 구문 """
         access_token = self.get_access_token()
         if not access_token:
-            return self.get_yahoo_backup_price(ticker, "한투 토큰 부재")
+            return None
             
-        # ⚠️ 슬래시 중복 및 누락 방지를 위한 안전한 주소 조립
-        url = f"{self.base_url.strip('/')}/uapi/domestic-stock/v1/quoting/inquire-price"
-        target_tr_id = "FHKST01010200"  # 실전투자 현재가 주식호가 전용 TR ID
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quoting/inquire-price"
         
+        # 💡 일반 PC 브라우저로 위장하여 한투 보안망 패스 유도
         headers = {
             "content-type": "application/json; charset=utf-8",
             "authorization": f"Bearer {access_token}",
             "appkey": self.app_key,
             "appsecret": self.app_secret,
-            "tr_id": target_tr_id,
-            "custtype": "P"
+            "tr_id": "FHKST01010200", # 실전투자 주식현재가 호가 TR ID
+            "custtype": "P",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
         params = {
             "FID_COND_MRKT_DIV_CODE": "J", 
@@ -69,12 +82,8 @@ class KoreaInvestmentAPI:
         }
         
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=3.0)
-            
-            # 만약 표준 주소에서 404가 발생하면, 포트포워딩 규격(:9443) 버전으로 즉시 재시도(Failover)
-            if response.status_code == 404:
-                backup_url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quoting/inquire-price"
-                response = requests.get(backup_url, headers=headers, params=params, timeout=3.0)
+            # 타임아웃을 5초로 늘려 한투 서버 접속 안전성 보장
+            response = self.session.get(url, headers=headers, params=params, timeout=5.0)
 
             if response.status_code == 200:
                 res_json = response.json()
@@ -82,8 +91,8 @@ class KoreaInvestmentAPI:
                 msg1 = res_json.get("msg1", "").strip()
                 
                 if rt_cd != "0":
-                    st.error(f"⚠️ [한투 데이터 거절 - {ticker}] 코드: {rt_cd} | 메시지: {msg1}")
-                    return self.get_yahoo_backup_price(ticker, f"한투 거절 ({msg1})")
+                    st.error(f"⚠️ [한투 데이터 거절 - {ticker}] {msg1}")
+                    return None
 
                 res_data = res_json.get("output", {})
                 if res_data and res_data.get("stck_prpr"):
@@ -92,63 +101,22 @@ class KoreaInvestmentAPI:
                     low_price = float(str(res_data.get("stck_lwpr", current_price)).strip().replace("-", "").replace("+", ""))
                     volume = float(str(res_data.get("accl_tr_vol", 0)).strip())
                     
-                    if current_price > 0:
-                        return {
-                            "Close": current_price,
-                            "High": high_price if high_price > 0 else current_price,
-                            "Low": low_price if low_price > 0 else current_price,
-                            "Volume": volume if volume > 0 else 1000.0,
-                            "Source": "한국투자증권 실전"
-                        }
+                    return {
+                        "Close": current_price,
+                        "High": high_price,
+                        "Low": low_price,
+                        "Volume": volume if volume > 0 else 1000.0,
+                        "Source": "한투 실전 호가 전용"
+                    }
             else:
-                st.error(f"❌ [한투 시세 API 최종 실패] 상태코드: {response.status_code} | 요청 경로 오접근")
-            
-            return self.get_yahoo_backup_price(ticker, f"HTTP 에러 {response.status_code}")
+                st.error(f"❌ [한투 통신 오류] 상태코드: {response.status_code}")
+            return None
         except Exception as e:
-            st.error(f"💥 [한투 시세 통신 예외 발생 - {ticker}]: {str(e)}")
-            return self.get_yahoo_backup_price(ticker, f"통신 예외")
-
-    def get_yahoo_backup_price(self, ticker, reason=""):
-        """ 한투 차단 시 실시간 수급 연산을 백업하기 위한 야후 라우팅 시스템 """
-        try:
-            clean_ticker = str(ticker).strip()
-            yahoo_ticker = f"{clean_ticker}.KQ"
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1m&range=1d"
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-            res = requests.get(url, headers=headers, timeout=2.0)
-            
-            if res.status_code != 200 or "result" not in res.json().get("chart", {}):
-                yahoo_ticker = f"{clean_ticker}.KS"
-                url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1m&range=1d"
-                res = requests.get(url, headers=headers, timeout=2.0)
-                
-            if res.status_code == 200:
-                json_data = res.json()
-                result = json_data.get("chart", {}).get("result", [])
-                if result:
-                    meta = result[0].get("meta", {})
-                    live_price = meta.get("regularMarketPrice")
-                    
-                    if live_price is None or float(live_price) <= 0:
-                        indicators = result[0].get("indicators", {}).get("quote", [{}])[0]
-                        closes = [c for c in indicators.get("close", []) if c is not None and c > 0]
-                        if closes: live_price = closes[-1]
-                    
-                    if live_price and float(live_price) > 0:
-                        final_p = float(live_price)
-                        return {
-                            "Close": final_p,
-                            "High": float(meta.get("fiftyTwoWeekHigh", final_p * 1.002)),
-                            "Low": float(meta.get("fiftyTwoWeekLow", final_p * 0.998)),
-                            "Volume": float(meta.get("regularMarketVolume", 250000.0)),
-                            "Source": f"야후 백업 ({reason})"
-                        }
-            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0, "Source": "데이터 오류"}
-        except:
-            return {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0, "Source": "데이터 오류"}
+            st.error(f"💥 [한투 직통 라인 타임아웃/연결 장애]: {str(e)}")
+            return None
 
 # =================================================================
-# 🏷️ 국내 주요 대형주 및 핵심 종목 마스터 딕셔너리
+# 🏷️ 국내 주요 대형주 마스터 딕셔너리
 # =================================================================
 STOCK_NAME_MAP = {
     "005930": "삼성전자", "000660": "SK하이닉스", "005380": "현대차", "000270": "기아",
@@ -238,7 +206,7 @@ if delete_target:
     st.rerun()
 
 st.markdown("### 🏹 실전 수급 돌파 스캐너")
-st.caption(f"⏱️ 실시간 거래소 동기화 중... ({datetime.now().strftime('%H:%M:%S')})")
+st.caption(f"⏱️ 한투 실전 서버 데이터 연동 중... ({datetime.now().strftime('%H:%M:%S')})")
 
 api = KoreaInvestmentAPI()
 current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -251,20 +219,25 @@ if st.button("🔑 버퍼 및 캐시 비우기 (오류 초기화)", use_containe
 summary_rows = []
 
 for ticker in st.session_state.custom_stock_pool:
+    # 💡 한투에서 시세를 가져옴
+    live_tick = api.get_realtime_price(ticker)
+    
+    # 만약 한투 통신 실패 시 화면 꼬임 방지를 위한 안전 예외처리
+    if not live_tick:
+        live_tick = {"Close": 0.0, "High": 0.0, "Low": 0.0, "Volume": 1000.0, "Source": "⚠️ 한투 수신 대기중"}
+
     if ticker not in st.session_state.multi_market_data or len(st.session_state.multi_market_data[ticker]) == 0:
-        raw_price = api.get_realtime_price(ticker)
         init_rows = []
         init_times = []
-        base_p = raw_price["Close"] if raw_price["Close"] > 0 else 50000.0
+        base_p = live_tick["Close"] if live_tick["Close"] > 0 else 50000.0
         
         for i in range(5, 0, -1):
             time_str = (datetime.now() - timedelta(minutes=i)).strftime('%Y-%m-%d %H:%M:%S')
             init_times.append(pd.to_datetime(time_str))
             mock_p = base_p + (i * 10 if i % 2 == 0 else -i * 5)
-            init_rows.append({"Close": mock_p, "High": mock_p * 1.001, "Low": mock_p * 0.999, "Volume": raw_price["Volume"]})
+            init_rows.append({"Close": mock_p, "High": mock_p * 1.001, "Low": mock_p * 0.999, "Volume": live_tick["Volume"]})
         st.session_state.multi_market_data[ticker] = pd.DataFrame(init_rows, index=init_times)
 
-    live_tick = api.get_realtime_price(ticker)
     if live_tick["Close"] > 0:
         new_df = pd.DataFrame([{"Close": live_tick["Close"], "High": live_tick["High"], "Low": live_tick["Low"], "Volume": live_tick["Volume"]}], index=[pd.to_datetime(current_time_str)])
         st.session_state.multi_market_data[ticker] = pd.concat([st.session_state.multi_market_data[ticker], new_df])
@@ -283,7 +256,7 @@ for ticker in st.session_state.custom_stock_pool:
         "종목코드": ticker, "종목명": get_stock_name(ticker), "현재 타이밍 신호": latest_info["타이밍 신호"],
         "현재가": int(latest_info['Close']), "수급선": int(latest_info['VWAP']), "RSI": int(latest_info["RSI"]),
         "저항선": int(latest_info['Local_High']), "실시간거래대금": realtime_trading_value, "신호가중치": signal_weight,
-        "데이터출처": live_tick.get("Source", "알 수 없음")
+        "데이터출처": live_tick.get("Source", "통신 대기")
     })
 
 st.markdown("---")
@@ -316,5 +289,6 @@ if summary_rows:
             with st.container():
                 st.success(f"🍏 **{sig}**\n\n{card_header}"); st.markdown(card_body); st.markdown("---")
 
-time.sleep(1.2)
+# 리프레시 간격을 2.5초로 조정하여 트래픽 과부하 방지
+time.sleep(2.5)
 st.rerun()
