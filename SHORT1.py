@@ -132,7 +132,7 @@ master_pool = get_ai_lead_stocks()
 
 col_btn1, col_btn2, col_info = st.columns([1, 1, 3])
 
-if col_btn1.button("⚡ AI 정예 10선 수급 동기화", type="primary", use_container_width=True, key="btn_sync_final_fixed"):
+if col_btn1.button("⚡ AI 정예 10선 수급 동기화", type="primary", use_container_width=True, key="btn_sync_final_perfect"):
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     with st.spinner("한투 보안 표준 인증 토큰 획득 중..."):
@@ -185,13 +185,13 @@ if col_btn1.button("⚡ AI 정예 10선 수급 동기화", type="primary", use_c
         else:
             st.error("🚨 [수신 실패] 시장 코드 매핑 구조를 다시 점검해야 합니다.")
 
-if col_btn2.button("🧹 단타 캐시 리셋", use_container_width=True, key="btn_reset_final_fixed"):
+if col_btn2.button("🧹 단타 캐시 리셋", use_container_width=True, key="btn_reset_final_perfect"):
     st.session_state.market_history = {}
     st.session_state.live_pct_map = {}
     if "data_loaded" in st.session_state: del st.session_state["data_loaded"]
     st.rerun()
 
-col_info.markdown("💡 **수정 완료:** 맨 아랫줄 구문 뒤틀림 및 코드 혼선 요소를 원천 제거했습니다.")
+col_info.markdown("💡 **보정 완료:** `st.blue` 디자인 컴포넌트 에러를 `st.info` 표준 규격으로 완벽 교체했습니다.")
 
 st.markdown("---")
 
@@ -248,11 +248,11 @@ if st.session_state.get("data_loaded", False) and st.session_state.market_histor
                 st.markdown(f"**코드:** `{row.code}` | **등락:** `{row.growth:+.2f}%`")
                 st.metric(label="현재 가격", value=f"{row.price:,}원", delta=f"평균차: {int(row.price - row.vwap):+}원")
                 
-                # 시그널 직관적 가시화
+                # 🎯 [핵심 수정] st.blue 대신 파란색 안내 박스인 st.info로 정밀 복구
                 if row.growth > 3.0:
                     st.error("🔥 초강력 수급 유입")
                 elif row.growth < -1.0:
-                    st.blue("🚨 단기 과매도 구간")
+                    st.info("🚨 단기 과매도 구간")
                 else:
                     st.success("🟢 안정 수급 추종")
                 st.markdown("---")
