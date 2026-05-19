@@ -12,6 +12,7 @@ st.set_page_config(page_title="AI 실시간 주도주 스캐너 Pro", layout="wi
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
+# 🎯 과거 캐시 락 수정을 위해 버튼 클릭 시마다 완전히 초기화되도록 구조 변경
 if "engine_cache" not in st.session_state: st.session_state.engine_cache = {}
 if "last_pool" not in st.session_state: st.session_state.last_pool = []
 if "hantu_token" not in st.session_state: st.session_state.hantu_token = None
@@ -43,8 +44,6 @@ class HantuSyncEngine:
 
     def fetch_market_pool(self, token):
         pool = []
-        
-        # 한투 오피셜 당일 거래대금 상위 순위 스캔
         url_vol = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
         headers_vol = {
             "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
@@ -58,19 +57,16 @@ class HantuSyncEngine:
             r = self.session.get(url_vol, headers=headers_vol, params=params_vol, timeout=4.0)
             if r.status_code == 200:
                 output = r.json().get("output", [])
-                
                 for item in output:
                     ticker = str(item.get("mksc_shrn_iscd", "")).strip()[-6:]
                     name = str(item.get("hts_kor_isnm", item.get("data_name", ""))).strip()
                     try: price = float(item.get("stck_prpr", 0))
                     except: price = 0
                     
-                    # 만 원 이상 우량주 조건에 맞는 것만 순서대로 추출
                     if ticker.isdigit() and name and name != "None" and price >= 10000:
                         if any(k in name for k in ["우", "스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF", "SOL", "ACE", "HANARO"]): continue
                         pool.append((ticker, name))
         except: pass
-        
         return pool
 
     def fetch_single_price(self, token, ticker, name):
@@ -95,26 +91,22 @@ class HantuSyncEngine:
                         "time": datetime.now().strftime("%H:%M:%S")
                     }
         except: pass
-
-        old = st.session_state.engine_cache.get(ticker, {})
-        return {
-            "ticker": ticker, "name": name,
-            "price": old.get("price", -1),
-            "ctrt": old.get("ctrt", 0.0),
-            "volume": old.get("volume", 0),
-            "stat": old.get("stat", "00"),
-            "time": old.get("time", "❌ 수신대기")
-        }
+        # 🎯 과거 캐시 복원 로직을 완전히 제거하여 실패 시 빈 값 처리
+        return None
 
 # =====================================================================
 # 🖥️ UI 대시보드 및 동기 처리 제어 파트
 # =====================================================================
-st.title("🎯 AI 실시간 주도주 검색기 (한투 오피셜 투자 순위 원본 연동)")
+st.title("🎯 AI 실시간 주도주 검색기 (투명한 시장 연동 버전)")
 
 if st.button("🔄 시장 실시간 주도주 새로 불러오기", type="primary", use_container_width=True):
     if "token_error" in st.session_state: del st.session_state["token_error"]
     
-    with st.spinner("한투 오피셜 서버의 실시간 거래대금 순위를 왜곡 없이 정밀 수집 중..."):
+    # 🎯 [핵심] 새로고침을 누르는 순간 과거의 캐시 메모리를 강제로 싹 다 밀어버립니다 (3개 종목 유령 차단)
+    st.session_state.engine_cache = {}
+    st.session_state.last_pool = []
+    
+    with st.spinner("과거 메모리를 청소하고 현재 마켓 상태 원본만 정밀 분석 중..."):
         engine = HantuSyncEngine()
         token = engine.get_token()
         
@@ -126,7 +118,8 @@ if st.button("🔄 시장 실시간 주도주 새로 불러오기", type="primar
             
             for idx, (t, n) in enumerate(dynamic_pool):
                 res = engine.fetch_single_price(token, t, n)
-                st.session_state.engine_cache[t] = res
+                if res:
+                    st.session_state.engine_cache[t] = res
                 time.sleep(0.12) 
             st.rerun()
 
@@ -138,7 +131,9 @@ display_list = []
 
 if st.session_state.last_pool:
     for t, n in st.session_state.last_pool:
-        c = st.session_state.engine_cache.get(t, {})
+        c = st.session_state.engine_cache.get(t)
+        if not c: continue # 시세 가져오기 실패한 낙오 종목은 표에 아예 올리지 않음
+        
         price_val = c.get("price", -1)
         ctrt_val = c.get("ctrt", 0.0)
         stat_val = c.get("stat", "00")
@@ -160,26 +155,15 @@ if st.session_state.last_pool:
         else:
             rank_grade = "📋 일반 관망"
 
-        if price_val > 0:
-            current_price_str = f"{int(price_val):,}원"
-            ctrt_str = f"{ctrt_val:+.2f}%"
-            vol_str = f"{int(c['volume']):,}주"
-            time_str = c.get("time", "-")
-        else:
-            current_price_str = "대기중"
-            ctrt_str = "0.00%"
-            vol_str = "-"
-            time_str = c.get("time", "-")
-
         display_list.append({
             "종목코드": t,
             "종목명": c.get("name", n),
             "AI 매매등급": rank_grade,
-            "현재가": current_price_str,
-            "등락률": ctrt_str,
-            "거래량": vol_str,
+            "현재가": f"{int(price_val):,}원" if price_val > 0 else "-",
+            "등락률": f"{ctrt_val:+.2f}%",
+            "거래량": f"{int(c['volume']):,}주",
             "상태": "⚠️ 유의종목" if is_restricted else "🟢 정상",
-            "수집시각": time_str
+            "수집시각": c.get("time", "-")
         })
 
 df_final = pd.DataFrame(display_list)
@@ -187,4 +171,5 @@ if not df_final.empty:
     df_final.insert(0, "시장투자순위", [f"{i+1}위" for i in range(len(df_final))])
     st.dataframe(df_final, use_container_width=True, hide_index=True, height=750)
 else:
-    st.info("💡 실시간 조회된 만 원 이상 주도주가 없습니다. 버튼을 눌러 스캔을 시작하시거나, 시장 대기 자금을 보존하십시오.")
+    # 🎯 과거 3개 종목 프리징 현상을 깨버리고, 현재 살 게 없으면 정직하게 빈 화면 알림을 띄웁니다.
+    st.info("📊 현재 한투 오피셜 실시간 마켓에 포착된 만 원 이상 주도주가 존재하지 않습니다. 시장 대기자금을 안전하게 보존하십시오.")
