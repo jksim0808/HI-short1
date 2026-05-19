@@ -525,9 +525,15 @@ for ticker in st.session_state.custom_stock_pool:
 
 st.markdown("---")
 
+# =================================================================
+# 🖥️ 결과 출력 대시보드
+# =================================================================
 if summary_rows:
     summary_df = pd.DataFrame(summary_rows).sort_values(by=['신호가중치', '실시간거래대금'], ascending=[True, False]).reset_index(drop=True)
     
+    if click_refresh and not summary_df[summary_df["신호가중치"] == 0].empty:
+        st.audio("https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg") 
+
     for index, row in summary_df.iterrows():
         sig = row["현재 타이밍 신호"]
         rank_idx = index + 1
@@ -540,9 +546,16 @@ if summary_rows:
             f"🍏 **수급**: {row['수급선']:,}원 | 🛑 **저항**: {row['저항선']:,}원"
         )
         
+        # 각 타이밍 시그널 상태에 맞는 컨테이너 렌더링 마감
         if sig == "🔥 매수 타점!!":
-            with st.container(): st.error(f"🎯 **{sig}**\n\n{card_header}\n\n{card_body}"); st.markdown("---")
+            with st.container(): 
+                st.error(f"🎯 **{sig}**\n\n{card_header}\n\n{card_body}")
+                st.markdown("---")
         elif sig == "🚨 익절/청산":
-            with st.container(): st.warning(f"🚨 **{sig}**\n\n{card_header}\n\n{card_body}"); st.markdown("---")
+            with st.container(): 
+                st.warning(f"🚨 **{sig}**\n\n{card_header}\n\n{card_body}")
+                st.markdown("---")
         else:
-            with st.container(): st.success(f"🍏 **{sig}**\n\n{card_header}\n\n{card_body}"); st.markdown("---")
+            with st.container(): 
+                st.success(f"🍏 **{sig}**\n\n{card_header}\n\n{card_body}")
+                st.markdown("---")
