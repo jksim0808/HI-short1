@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 # =====================================================================
 # ⚙️ [최우선] Streamlit 설정 및 세션 초기화
 # =====================================================================
-st.set_page_config(page_title="2순위 신상대장 추적 스캐너 Pro", layout="wide")
+st.set_page_config(page_title="10,000원 이상 우량주 수급 스캐너 Pro", layout="wide")
 
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
@@ -34,13 +34,13 @@ TOKEN_FILE = "hantu_token_cache.json"
 # =====================================================================
 # 🖥️ 상단 실시간 통신 진단 모니터
 # =====================================================================
-st.title("🎯 AI 오전 3단계 스캐너 × 하단 네이버 차트 (2순위 신상대장 추적판)")
+st.title("🎯 AI 오전 3단계 스캐너 × 하단 네이버 차트 (10,000원 이상 우량주 모드)")
 st.warning(f"📡 **실시간 라인 진단 모니터:** {st.session_state.net_log}")
 
 st.write("---")
 
 # =====================================================================
-# 🏹 무결점 전종목 수집 엔진
+# 🏹 10,000원 미만 무조건 커트 오피셜 엔진
 # =====================================================================
 class HantuGoldenEngine:
     def __init__(self):
@@ -98,7 +98,7 @@ class HantuGoldenEngine:
                 res_data = r.json()
                 output = res_data.get("output", [])
                 
-                st.session_state.net_log = f"🟢 수급 파이프라인 무제한 연동 성공! 실시간 변동성 감지 중 ({current_time_str} 기준)"
+                st.session_state.net_log = f"🟢 우량주 파이프라인 연동 성공! 10,000원 이하 종목 영구 격리 중 ({current_time_str} 기준)"
                 
                 for item in output:
                     try:
@@ -117,8 +117,12 @@ class HantuGoldenEngine:
                         amt_val = price * volume
                         
                         if ticker.isdigit() and name and name != "None":
+                            # 1단계: 금융 파생상품 노이즈 필터링
                             if any(k in name for k in ["스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF"]): continue
                             if name.endswith("우") or any(name.endswith(f"우{s}") for s in ["B", "C", " 우선주", "1", "2", "3"]): continue
+                            
+                            # 2단계: 🛠️ [가격 차단 필터 적용] 현재가가 10,000원 미만인 잡주는 원천 소싱에서 완전 격리
+                            if price < 10000: continue
                             
                             pool.append((ticker, name, amt_val, price, ctrt, stat_code))
                     except:
@@ -132,7 +136,7 @@ class HantuGoldenEngine:
 # =====================================================================
 cc1, cc2 = st.columns([4, 1])
 with cc1:
-    btn_fetch = st.button("🔄 실시간 수급 현황 전체 불러오기 (2순위 신상대장 노다지 사냥)", type="primary", use_container_width=True)
+    btn_fetch = st.button("🔄 실시간 우량 주도주 새로 불러오기 (10,000원 이상 전용)", type="primary", use_container_width=True)
 with cc2:
     btn_clear = st.button("⚠️ 시스템 세션 초기화", type="secondary", use_container_width=True)
 
@@ -145,7 +149,7 @@ if btn_clear:
 
 if btn_fetch:
     st.session_state.last_pool = []
-    with st.spinner("2순위 신상 대장주 레이더 가동 중..."):
+    with st.spinner("10,000원 이상 수급 노다지 종목 스캔 중..."):
         engine = HantuGoldenEngine()
         token = engine.get_token()
         if token:
@@ -153,9 +157,9 @@ if btn_fetch:
             st.rerun()
 
 # =====================================================================
-# 📊 [상단 구역] 수급 테이블 배치 및 2순위 정밀 마킹 시스템
+# 📊 [상단 구역] 우량주 수급 테이블 배치
 # =====================================================================
-st.markdown("### 📊 실시간 수급 종합 순위표 (원하는 종목 앞 체크박스를 선택하세요)")
+st.markdown("### 📊 실시간 우량주 수급 순위표 (원하는 종목 앞 체크박스를 선택하세요)")
 
 display_list = []
 
@@ -192,7 +196,7 @@ if isinstance(st.session_state.last_pool, list) and len(st.session_state.last_po
                 "종목코드": t,
                 "종목명": display_name,
                 "수급 등급 분류": rank_grade,
-                "현재가": f"{int(price):,}원" if price > 0 else "데이터 오류",
+                "현재가": f"{int(price):,}원",
                 "등락률": f"{ctrt:+.2f}%",
                 "추정 거래대금": f"{int(amt / 100000000):,}억 원",
                 "실전 행동 지침": action_tag
