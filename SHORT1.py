@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 # =====================================================================
 # ⚙️ [최우선] Streamlit 설정 및 세션 초기화
 # =====================================================================
-st.set_page_config(page_title="오전 3단계 스캐너 × 네이버 차트 직송 Pro", layout="wide")
+st.set_page_config(page_title="오전 집중 3단계 올라이브 스캐너 Pro", layout="wide")
 
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
@@ -34,13 +34,13 @@ TOKEN_FILE = "hantu_token_cache.json"
 # =====================================================================
 # 🖥️ 상단 실시간 통신 진단 모니터
 # =====================================================================
-st.title("🎯 AI 오전 전종목 3단계 스캐너 × 네이버 실시간 차트")
+st.title("🎯 AI 오전 3단계 스캐너 × 네이버 차트 (실시간 VI / 특이종목 마킹 버전)")
 st.warning(f"📡 **실시간 라인 진단 모니터:** {st.session_state.net_log}")
 
 st.write("---")
 
 # =====================================================================
-# 🏹 404/403 우회 + 3단계 분류 직송 엔진
+# 🏹 전종목 수집 + 실시간 상태 코드 마킹 하이브리드 엔진
 # =====================================================================
 class HantuGoldenEngine:
     def __init__(self):
@@ -90,7 +90,7 @@ class HantuGoldenEngine:
         }
         params_vol = {
             "FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20171",
-            "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_SORT_CLS_CODE": "3" # 거래대금순 상위 소싱
+            "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_SORT_CLS_CODE": "3" # 거래대금순
         }
         try:
             r = self.session.get(url_vol, headers=headers_vol, params=params_vol, timeout=5.0)
@@ -98,7 +98,7 @@ class HantuGoldenEngine:
                 res_data = r.json()
                 output = res_data.get("output", [])
                 
-                st.session_state.net_log = f"🟢 수급 파이프라인 동기화 성공! 원본 수: {len(output)}개 ({current_time_str} 기준)"
+                st.session_state.net_log = f"🟢 수급 파이프라인 무제한 연동 성공! 실시간 변동성 감지 중 ({current_time_str} 기준)"
                 
                 for item in output:
                     try:
@@ -109,6 +109,10 @@ class HantuGoldenEngine:
                         raw_ctrt = item.get("prdy_ctrt", "0.0")
                         raw_volume = item.get("acml_vol", "0")
                         
+                        # 🛠️ [삭제 대신 상태 코드 정밀 마킹 활용]
+                        # 00:정상, 51:관리, 52:투자유의, 53:거래정지, 54:정리매매, 55:신용가능, 57:투자경고, 58:정적VI발동, 59:동적VI발동
+                        stat_code = str(item.get("iscd_stat_cls_code", "00")).strip()
+                        
                         price = float(raw_price) if str(raw_price).replace('.','',1).isdigit() else 0
                         ctrt = float(raw_ctrt) if str(raw_ctrt).replace('-','',1).replace('.','',1).isdigit() else 0.0
                         volume = float(raw_volume) if str(raw_volume).replace('.','',1).isdigit() else 0
@@ -116,10 +120,12 @@ class HantuGoldenEngine:
                         amt_val = price * volume
                         
                         if ticker.isdigit() and name and name != "None":
+                            # ETF, ETN, 인버스 노이즈만 필터링
                             if any(k in name for k in ["스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF"]): continue
                             if name.endswith("우") or any(name.endswith(f"우{s}") for s in ["B", "C", " 우선주", "1", "2", "3"]): continue
                             
-                            pool.append((ticker, name, amt_val, price, ctrt))
+                            # 🛠️ 수급 판단을 위해 필터에서 제외하지 않고, 상태 코드를 꼬리표로 묶어 pool에 적재
+                            pool.append((ticker, name, amt_val, price, ctrt, stat_code))
                     except:
                         continue
         except Exception as e:
@@ -131,7 +137,7 @@ class HantuGoldenEngine:
 # =====================================================================
 cc1, cc2 = st.columns([4, 1])
 with cc1:
-    btn_fetch = st.button("🔄 실시간 수급 현황 전체 불러오기 (네이버 차트 동기화)", type="primary", use_container_width=True)
+    btn_fetch = st.button("🔄 실시간 수급 현황 전체 불러오기 (VI/유의종목 실시간 추적)", type="primary", use_container_width=True)
 with cc2:
     btn_clear = st.button("⚠️ 시스템 세션 초기화", type="secondary", use_container_width=True)
 
@@ -144,7 +150,7 @@ if btn_clear:
 
 if btn_fetch:
     st.session_state.last_pool = []
-    with st.spinner("가장 안전한 채널로 수급 원본 파이프라인 동기화 중..."):
+    with st.spinner("호가 정지 및 특이 수급 종목 마킹 시스템 가동 중..."):
         engine = HantuGoldenEngine()
         token = engine.get_token()
         if token:
@@ -152,30 +158,53 @@ if btn_fetch:
             st.rerun()
 
 # =====================================================================
-# 📊 [상단 구역] 수급 테이블 광폭 배치
+# 📊 [상단 구역] 수급 테이블 광폭 배치 (실시간 마킹 연산부)
 # =====================================================================
 st.markdown("### 📊 실시간 수급 종합 순위표 (원하는 종목 앞 체크박스를 선택하세요)")
 
 display_list = []
 if st.session_state.last_pool:
-    for t, n, amt, price, ctrt in st.session_state.last_pool:
+    for t, n, amt, price, ctrt, stat in st.session_state.last_pool:
+        
+        # 🛠️ [실전 트레이더용 매칭 마크 생성]
+        if stat == "58" or stat == "59":
+            display_name = f"🚨[VI발동] {n}"
+            state_desc = "⚡ 실시간 호가 동결 (변동성 완화장치)"
+        elif stat == "52":
+            display_name = f"⚠️[투자유의] {n}"
+            state_desc = "🚩 단기 작전/리스크 종목 (뇌동주의)"
+        elif stat == "51":
+            display_name = f"❌[관리종목] {n}"
+            state_desc = "🚩 부실 위험 종목 (투자 경계)"
+        elif stat == "53":
+            display_name = f"🔒[거래정지] {n}"
+            state_desc = "🛑 매매 불가 일시 락업"
+        elif stat == "57":
+            display_name = f"🔥[경고지정] {n}"
+            state_desc = "⚡ 투자경고 종목 (급등 대장주 가능성)"
+        else:
+            display_name = n
+            state_desc = "🟢 정상 거래 중"
+
+        # 3단계 분류 연산
         if ctrt >= 10.0:
             rank_grade = "🔥 1단계: A급 (수급 대장주)"
-            action_tag = "🟢 최우선 돌파/눌림"
+            action_tag = "최우선 돌파/눌림 타깃"
         elif ctrt >= 1.0 and ctrt < 10.0:
             rank_grade = "⚡ 2단계: B급 (후발주)"
-            action_tag = "🟢 짧은 스캘핑"
+            action_tag = "방망이 짧게 스캘핑"
         else:
             rank_grade = "⚪ 3단계: C급 (관망)"
-            action_tag = "🟡 진입 자제"
+            action_tag = "진입 자제"
 
         display_list.append({
             "종목코드": t,
-            "종목명": n,
+            "종목명": display_name,
             "수급 등급 분류": rank_grade,
             "현재가": f"{int(price):,}원" if price > 0 else "데이터 오류",
             "등락률": f"{ctrt:+.2f}%",
             "추정 거래대금": f"{int(amt / 100000000):,}억 원",
+            "한투 오피셜 상태": state_desc,
             "실전 지침": action_tag
         })
 
@@ -193,41 +222,42 @@ if not df_final.empty:
         use_container_width=True,
         hide_index=True,
         column_config={"선택": st.column_config.CheckboxColumn(required=True)},
-        disabled=["순위", "종목코드", "종목명", "수급 등급 분류", "현재가", "등락률", "추정 거래대금", "실전 지침"],
+        disabled=["순위", "종목코드", "종목명", "수급 등급 분류", "현재가", "등락률", "추정 거래대금", "한투 오피셜 상태", "실전 지침"],
         height=350
     )
     
     selected_rows = edited_df[edited_df["선택"] == True]
     if not selected_rows.empty:
         selected_ticker = selected_rows.iloc[0]["종목코드"]
-        selected_name = selected_rows.iloc[0]["종목명"]
+        # 종목명에서 경고 꼬리표[🚨VI발동] 떼어내고 순수 한글명만 추출하여 네이버 차트 전달
+        raw_selected_name = selected_rows.iloc[0]["종목명"]
+        selected_name = raw_selected_name.split("]")[-1].strip()
     else:
         selected_ticker = df_final.iloc[0]["종목코드"]
-        selected_name = df_final.iloc[0]["종목명"]
+        raw_selected_name = df_final.iloc[0]["종목명"]
+        selected_name = raw_selected_name.split("]")[-1].strip()
 else:
     st.info("💡 실시간 주도주 불러오기 버튼을 클릭하시면 전 종목 3단계 분류 그리드가 가동됩니다.")
 
 st.write("---")
 
 # =====================================================================
-# 📈 [하단 구역] 네이버 실시간 차트 직송 스튜디오 (연결 거부 100% 우회)
+# 📈 [하단 구역] 네이버 실시간 차트 스튜디오
 # =====================================================================
 st.markdown("### 📈 네이버 증권 실시간 오리지널 차트 패널")
 
 if selected_ticker:
     st.success(f"🔍 현재 네이버 실시간 차트 연동 완료: **{selected_name} ({selected_ticker})**")
     
-    # 단타용 탭 구성 (분봉 차트와 일봉 차트를 대표님이 원터치로 교체할 수 있게 배정)
     tab1, tab2 = st.tabs(["⚡ 단타 필수: 실시간 당일 분봉 차트", "📅 추세 확인: 일봉 차트"])
+    time_seed = int(time.time())
     
     with tab1:
-        # 🛠️ 네이버 금융 실시간 당일 분봉 차트 서버 이미지 엔진 다이렉트 소싱 주소
-        naver_minute_chart = f"https://ssl.pstatic.net/imgfinance/chart/item/area/day/{selected_ticker}.png?sid={int(time.time())}"
-        st.image(naver_minute_chart, caption=f"[{selected_name}] 네이버 금융 실시간 당일 거래량 매칭 분봉 현황", use_container_width=True)
+        naver_minute_chart = f"https://ssl.pstatic.net/imgfinance/chart/item/area/day/{selected_ticker}.png?v={time_seed}"
+        st.image(naver_minute_chart, caption=f"[{selected_name}] 네이버 금융 실시간 분봉 및 누적 거래량 흐름", use_container_width=True)
         
     with tab2:
-        # 🛠️ 네이버 금융 실시간 일봉 차트 서버 이미지 엔진 다이렉트 소싱 주소
-        naver_day_chart = f"https://ssl.pstatic.net/imgfinance/chart/item/candle/day/{selected_ticker}.png?sid={int(time.time())}"
-        st.image(naver_day_chart, caption=f"[{selected_name}] 네이버 금융 실시간 일봉 캔들 현황", use_container_width=True)
+        naver_day_chart = f"https://ssl.pstatic.net/imgfinance/chart/item/candle/day/{selected_ticker}.png?v={time_seed}"
+        st.image(naver_day_chart, caption=f"[{selected_name}] 네이버 금융 실시간 일봉 캔들 흐름", use_container_width=True)
 else:
-    st.info("⬆️ 상단 순위 리스트에서 원하시는 종목의 [선택] 체크박스를 켜시면 하단에 네이버 오리지널 차트 모니터가 즉시 가동됩니다.")
+    st.info("⬆️ 상단 순위 리스트에서 원하시는 종목의 [선택] 체크박스를 켜시면 하단에 네이버 오리지널 차트가 표출됩니다.")
