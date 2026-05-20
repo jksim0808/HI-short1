@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 # =====================================================================
 # ⚙️ [최우선] Streamlit 설정 및 세션 초기화
 # =====================================================================
-st.set_page_config(page_title="플러스 상승 우량주 마스터 스캐너 Pro", layout="wide")
+st.set_page_config(page_title="단타 주도주 Pro 마스터 스캐너", layout="wide")
 
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
@@ -30,11 +30,20 @@ current_time_str = now_kst.strftime("%H:%M:%S")
 TOKEN_FILE = "hantu_token_cache.json"
 
 # =====================================================================
-# 🖥️ 상단 실시간 통신 진단 모니터
+# 🖥️ 상단 대시보드 및 실시간 진단 모니터
 # =====================================================================
-st.title("🎯 코스피 200 × 코스닥 150 플러스 상승 종목 전용 스캐너 Pro")
-st.warning(f"📡 **실시간 라인 진단 모니터:** {st.session_state.net_log}")
+st.title("🎯 AI 단타 주도주 × 네이버 실시간 차트 마스터 스캐너")
 
+# 단타 매매 4대 핵심 요약 가이드 배치 (scannable 구조)
+st.markdown("""
+> 💡 **실전 단타 4대 판독 오피셜 공식**
+> 1. **거래대금**: 당일 누적 최소 500억 이상 유입 및 분당 뭉칫돈 스캔
+> 2. **상승탄력**: 시가 갭 +15% 이상 갭부담 종목 제외, 당일 등락률 +10% 이상 집중
+> 3. **분봉타점**: 장대양봉 추격 금지 ➔ 거래량 급감하는 '첫 번째 음봉 눌림목' 공략
+> 4. **테마/명분**: 업종별 커플링(동조화) 확인 및 특징주 뉴스 결합 종목 우선
+""")
+
+st.warning(f"📡 **실시간 라인 진단 모니터:** {st.session_state.net_log}")
 st.write("---")
 
 # =====================================================================
@@ -106,7 +115,7 @@ class HantuPlusEnginePro:
                             except: continue
         except: pass
             
-        # 주성엔지니어링(036930) 등 대표 주도 핵심종목 영구 보완책 가드
+        # 🛠️ 주성엔지니어링(036930) 및 주요 핵심 주도 우량주 마스터 락킹 보완벽
         backup_essential = ["036930", "005930", "000660", "035720", "035420", "005380", "000270"]
         total_res = list(set(tickers + backup_essential))
         return total_res
@@ -136,7 +145,7 @@ class HantuPlusEnginePro:
 
     def fetch_market_pool_by_indices(self, token):
         total_tickers = self.fetch_master_tickers_via_file()
-        st.session_state.net_log = f"🟢 지수 데이터베이스 동기화 완료! {len(total_tickers)}개 추적 중 ({current_time_str})"
+        st.session_state.net_log = f"🟢 양대지수 정예 DB 마스터 동기화 성공! {len(total_tickers)}개 종목 추적 중 ({current_time_str})"
         
         rank_map = {}
         url_vol = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
@@ -167,7 +176,7 @@ class HantuPlusEnginePro:
 
         pool = []
         
-        # 대표 주성엔지니어링 및 고부가가치 우량 종목 위주로 15개 압축 매핑 연산 가동 (트래픽 경량화)
+        # 🛠️ 주성엔지니어링 및 고품격 우량 종목 위주로 매핑 연산 가동 (트래픽 과부하 방지 가드)
         target_sub_pool = [t for t in total_tickers if t in rank_map or t in ["036930", "005930", "000660", "035720"]]
         
         for ticker in target_sub_pool:
@@ -180,7 +189,7 @@ class HantuPlusEnginePro:
                 amt_val = price * r_data["volume"]
                 raw_rank = r_data["rank"]
             else:
-                # 🛠️ [해결 핵심] 100위권 밖에 있어 랭킹맵에 없으면 강제로 실시간 가격 다이렉트 호출 파이프 가동
+                # 100위권 밖에 있어 랭킹 데이터가 없는 주성엔지니어링 등은 실시간 개별 API로 강제 데이터 복원
                 s_res = self.fetch_single_stock_search(token, ticker)
                 if s_res:
                     price = s_res["price"]
@@ -195,18 +204,18 @@ class HantuPlusEnginePro:
                 else:
                     continue
 
-            # 🚫 필터 1단계: 파생상품/인버스 노이즈 소멸
+            # 🚫 필터 1단계: ETF / ETN / 인버스 / 레버리지 등 금융 파생노이즈 파쇄
             if any(k in name for k in ["스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF"]): continue
             
-            # 🚫 필터 2단계: 10,000원 이하 동전주 커트
+            # 🚫 필터 2단계: 10,000원 이하 동전주/가벼운 잡주 격리 컷 (우량 주도주 집중)
             if price > 0 and price < 10000: continue
             
-            # 🚫 필터 3단계: 0% 이하(마이너스 및 보합)인 하락 종목 전면 파쇄!
+            # 🚫 필터 3단계: 등락률이 0% 이하인 보합 및 하락 마이너스 종목 전면 제외 (양봉 고정)
             if ctrt <= 0.0: continue
             
             pool.append((raw_rank, ticker, name, amt_val, price, ctrt, stat))
                 
-        # 자금 활성 순위로 정렬
+        # 자금 집중도가 높은 순으로 칼정렬
         pool.sort(key=lambda x: x[0])
         return pool
 
@@ -227,7 +236,7 @@ if btn_clear:
 
 if btn_fetch:
     st.session_state.last_pool = []
-    with st.spinner("하락주 무조건 격리 파쇄! 주성엔지니어링 실시간 추적 중..."):
+    with st.spinner("마이너스 하락주 전면 격리 파쇄! 주성엔지니어링 등 실시간 우량 주도주 싱크 중..."):
         engine = HantuPlusEnginePro()
         token = engine.get_token()
         if token:
@@ -237,7 +246,7 @@ if btn_fetch:
 # =====================================================================
 # 📊 [상단 구역] 플러스 상승 우량주 전용 통합 수급 표
 # =====================================================================
-st.markdown("### 📊 실시간 양봉(+) 우량주 수급 순위표")
+st.markdown("### 📊 실시간 양봉(+) 우량주 통합 수급 순위표")
 
 display_list = []
 if isinstance(st.session_state.last_pool, list) and len(st.session_state.last_pool) > 0:
@@ -271,7 +280,7 @@ if isinstance(st.session_state.last_pool, list) and len(st.session_state.last_po
                 "수급 등급 분류": rank_grade,
                 "현재가": f"{int(price):,}원",
                 "등락률": f"{ctrt:+.2f}%",
-                "당일 누적대금": f"{int(amt / 100000000):,}억 원" if amt > 0 else "실시간 집계 중",
+                "당일 누적대금": f"{int(amt / 100000000):,}억 원" if amt > 0 else "실시간 계측 중",
                 "실전 행동 지침": action_tag
             })
 
@@ -283,7 +292,7 @@ selected_name = None
 if not df_final.empty:
     df_final.insert(0, "선택", False)
     
-    # 주성엔지니어링이 상승 종목 리스트에 포착되면 즉시 자동 체크포커싱
+    # 🛠️ 주성엔지니어링이 양봉 종목 리스트에 포착되면 첫 화면에서 즉시 체크박스 락인 활성화
     for i, r in df_final.iterrows():
         if "주성엔지니어링" in r["종목명"]:
             df_final.loc[i, "선택"] = True
@@ -308,7 +317,7 @@ if not df_final.empty:
         raw_selected_name = df_final.iloc[0]["종목명"]
         selected_name = raw_selected_name.split("]")[-1].strip()
 else:
-    st.info("💡 오늘 대한민국 350대 우량주 중 플러스(+) 상승 중인 종목이 감지되지 않았거나 동기화 대기 중입니다. 상단 버튼을 눌러 스캐너를 가동하세요.")
+    st.info("💡 오늘 대한민국 우량주 중 플러스(+) 상승 중인 종목이 감지되지 않았거나 동기화 대기 중입니다. 상단 버튼을 클릭하세요.")
 
 st.write("---")
 
