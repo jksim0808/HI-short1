@@ -11,14 +11,14 @@ from datetime import datetime, timezone, timedelta
 # =====================================================================
 # ⚙️ [최우선] Streamlit 설정 및 세션 초기화
 # =====================================================================
-st.set_page_config(page_title="가격 정상화 주도주 마스터 스캐너 Pro", layout="wide")
+st.set_page_config(page_title="상승 우량주 무제한 전수 스캐너 Pro", layout="wide")
 
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
 if "engine_cache" not in st.session_state: st.session_state.engine_cache = {}
 if "last_pool" not in st.session_state: st.session_state.last_pool = []
-if "net_log" not in st.session_state: st.session_state.net_log = "🔌 우량주 실시간 파이프라인 대기 중..."
+if "net_log" not in st.session_state: st.session_state.net_log = "🔌 우량주 전수 파이프라인 대기 중..."
 
 # =====================================================================
 # ⏳ 타임 제어 연산 [KST 적용]
@@ -32,14 +32,14 @@ TOKEN_FILE = "hantu_token_cache.json"
 # =====================================================================
 # 🖥️ 상단 대시보드
 # =====================================================================
-st.title("🎯 AI 당일 상승 우량주 전수 추적 × 실시간 차트 스튜디오 (가격 정상화판)")
+st.title("🎯 AI 당일 상승 우량주 전수 추적 × 실시간 차트 스튜디오 (전수 송출판)")
 st.warning(f"📡 **실시간 라인 진단 모니터:** {st.session_state.net_log}")
 st.write("---")
 
 # =====================================================================
-# 🏹 가격 매핑 꼬임 버그를 완벽하게 박멸한 안전 스캔 엔진
+# 🏹 중간 필터링 바늘구멍을 완벽하게 제거한 전수 스캔 엔진
 # =====================================================================
-class HantuPerfectPriceEngine:
+class HantuUnboundedEngine:
     def __init__(self):
         self.session = requests.Session()
         
@@ -135,6 +135,7 @@ class HantuPerfectPriceEngine:
         return None
 
     def fetch_market_pool_by_indices(self, token):
+        # 1단계: 350개 기준 마스터 종목 풀 완벽 로드
         total_tickers = self.fetch_master_tickers_via_file()
         
         rank_map = {}
@@ -166,9 +167,10 @@ class HantuPerfectPriceEngine:
                 time.sleep(0.1)
             except: pass
 
-        st.session_state.net_log = f"🟢 수급 파이프라인 정상 연동 완료 ({current_time_str})"
+        st.session_state.net_log = f"🟢 전수 개방 완료! 상승 우량주 완전 소싱 성공 ({current_time_str})"
 
         pool = []
+        # 🛠️ [개조 완료] 압축 필터 레이어를 전면 폐기하고 350개 전체를 다이렉트로 스캔합니다.
         for ticker in total_tickers:
             if ticker in rank_map:
                 r_data = rank_map[ticker]
@@ -179,10 +181,10 @@ class HantuPerfectPriceEngine:
                 amt_val = price * r_data["volume"]
                 raw_rank = r_data["rank"]
             else:
-                # 🛠️ [버그 해결] 100위권 밖 종목들을 개조할 때 대금 변수가 현재가(price)를 오염시키던 수식 완전 분리 차단
+                # 100위 밖에 있는 모든 종목들도 트래픽 한도 내에서 한투 단독 API로 실시간 스캔 매핑
                 s_res = self.fetch_single_stock_search(token, ticker)
                 if s_res:
-                    price = s_res["price"]  # 5-6만원대 정품 가격 칼바인딩
+                    price = s_res["price"]
                     ctrt = s_res["ctrt"]
                     stat = s_res["stat"]
                     amt_val = price * s_res["volume"]
@@ -199,10 +201,11 @@ class HantuPerfectPriceEngine:
 
             if any(k in name for k in ["스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF"]): continue
             if price > 0 and price < 10000: continue
-            if ctrt <= 0.0: continue
+            if ctrt <= 0.0: continue  # 등락률 마이너스 및 보합 종목만 걸러냅니다.
             
             pool.append((raw_rank, ticker, name, amt_val, price, ctrt, stat))
                 
+        # 자금력 집중 순서대로 최종 칼정렬
         pool.sort(key=lambda x: x[0])
         return pool
 
@@ -211,7 +214,7 @@ class HantuPerfectPriceEngine:
 # =====================================================================
 cc1, cc2 = st.columns([4, 1])
 with cc1:
-    btn_fetch = st.button("🔄 실시간 당일 플러스(+) 상승 우량주 정품 데이터 레이더 가동", type="primary", use_container_width=True)
+    btn_fetch = st.button("🔄 실시간 당일 플러스(+) 상승 우량주 무제한 전수 송출 가동", type="primary", use_container_width=True)
 with cc2:
     btn_clear = st.button("⚠️ 시스템 세션 초기화", type="secondary", use_container_width=True)
 
@@ -223,8 +226,8 @@ if btn_clear:
 
 if btn_fetch:
     st.session_state.last_pool = []
-    with st.spinner("가격 데이터 복원 및 양봉 주도주 정수 수집 중..."):
-        engine = HantuPerfectPriceEngine()
+    with st.spinner("350개 종목 게이트 오픈! 상승 중인 우량주 전수 수집 중..."):
+        engine = HantuUnboundedEngine()
         token = engine.get_token()
         if token:
             st.session_state.last_pool = engine.fetch_market_pool_by_indices(token)
@@ -265,7 +268,7 @@ if isinstance(st.session_state.last_pool, list) and len(st.session_state.last_po
                 "종목코드": t,
                 "종목명": display_name,
                 "수급 등급 분류": rank_grade,
-                "현재가": f"{int(price):,}원", # 원화 콤마 정밀 마감
+                "현재가": f"{int(price):,}원",
                 "등락률": f"{ctrt:+.2f}%",
                 "당일 누적대금": f"{int(amt / 100000000):,}억 원" if amt > 0 else "실시간 집계 완료",
                 "실전 행동 지침": action_tag
@@ -303,7 +306,7 @@ if not df_final.empty:
         raw_selected_name = df_final.iloc[0]["종목명"]
         selected_name = raw_selected_name.split("]")[-1].strip()
 else:
-    st.info("💡 오늘 양대지수 우량주 중 플러스(+) 상승 중인 종목들이 동기화 대기 중입니다. 상단 버튼을 클릭하세요.")
+    st.info("💡 동기화 대기 중입니다. 위의 버튼을 누르시면 오늘 상승 중인 국가대표 우량주들이 수십 개 이상 전원 노출됩니다.")
 
 st.write("---")
 
