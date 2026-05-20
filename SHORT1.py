@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 # =====================================================================
 # ⚙️ [최우선] Streamlit 설정 및 세션 초기화
 # =====================================================================
-st.set_page_config(page_title="오전 3단계 수급 스캐너 & 차트 스튜디오 Pro", layout="wide")
+st.set_page_config(page_title="오전 집중 3단계 스캐너 × 하단 차트 Pro", layout="wide")
 
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
@@ -34,13 +34,13 @@ TOKEN_FILE = "hantu_token_cache.json"
 # =====================================================================
 # 🖥️ 상단 실시간 통신 진단 모니터
 # =====================================================================
-st.title("🎯 AI 오전 전종목 3단계 스캐너 × 실시간 차트 스튜디오")
+st.title("🎯 AI 오전 전종목 3단계 스캐너 × 하단 차트 스튜디오")
 st.warning(f"📡 **실시간 라인 진단 모니터:** {st.session_state.net_log}")
 
 st.write("---")
 
 # =====================================================================
-# 🏹 404 주소 오류 차단 + 3단계 분류 직송 엔진
+# 🏹 404/403 우회 + 3단계 분류 직송 엔진
 # =====================================================================
 class HantuGoldenEngine:
     def __init__(self):
@@ -90,7 +90,7 @@ class HantuGoldenEngine:
         }
         params_vol = {
             "FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20171",
-            "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_SORT_CLS_CODE": "3" # 거래대금 상위순
+            "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_SORT_CLS_CODE": "3" # 거래대금순 상위 소싱
         }
         try:
             r = self.session.get(url_vol, headers=headers_vol, params=params_vol, timeout=5.0)
@@ -131,7 +131,7 @@ class HantuGoldenEngine:
 # =====================================================================
 cc1, cc2 = st.columns([4, 1])
 with cc1:
-    btn_fetch = st.button("🔄 실시간 수급 현황 전체 불러오기 (차트 스튜디오 동기화)", type="primary", use_container_width=True)
+    btn_fetch = st.button("🔄 실시간 수급 현황 전체 불러오기 (하단 대형 차트 동기화)", type="primary", use_container_width=True)
 with cc2:
     btn_clear = st.button("⚠️ 시스템 세션 초기화", type="secondary", use_container_width=True)
 
@@ -152,12 +152,11 @@ if btn_fetch:
             st.rerun()
 
 # =====================================================================
-# 📊 [전면 개조] 2단 분할 레이아웃 (수급 순위표 + 실시간 차트 뷰어)
+# 📊 [상단 구역] 수급 테이블 광폭 배치
 # =====================================================================
-col_list, col_chart = st.columns([5, 5]) # 5:5 화면 분할로 시인성 확보
+st.markdown("### 📊 실시간 수급 종합 순위표 (원하는 종목 앞 체크박스를 선택하세요)")
 
 display_list = []
-
 if st.session_state.last_pool:
     for t, n, amt, price, ctrt in st.session_state.last_pool:
         if ctrt >= 10.0:
@@ -182,47 +181,49 @@ if st.session_state.last_pool:
 
 df_final = pd.DataFrame(display_list)
 
-# --- 1) 좌측 패널: 실시간 주도주 데이터 테이블 표출 ---
-with col_list:
-    st.markdown("### 📊 실시간 수급 종합 순위표")
-    if not df_final.empty:
-        df_final.insert(0, "선택", False) # 클릭/선택용 체크박스 컬럼 추가
-        df_final.insert(1, "순위", [f"{i+1}위" for i in range(len(df_final))])
-        
-        # 🛠️ st.data_editor를 사용하여 대표님이 마우스로 클릭한 종목을 실시간 감지
-        edited_df = st.data_editor(
-            df_final,
-            use_container_width=True,
-            hide_index=True,
-            column_config={"선택": st.column_config.CheckboxColumn(required=True)},
-            disabled=["순위", "종목코드", "종목명", "수급 등급 분류", "현재가", "등락률", "추정 거래대금", "실전 지침"],
-            height=600
-        )
-        
-        # 대표님이 체크박스 버튼을 누른 종목을 감지
-        selected_rows = edited_df[edited_df["선택"] == True]
-        if not selected_rows.empty:
-            selected_ticker = selected_rows.iloc[0]["종목코드"]
-            selected_name = selected_rows.iloc[0]["종목명"]
-        else:
-            # 아무것도 선택하지 않았을 때는 리스트 1등 종목 차트를 기본값으로 출력
-            selected_ticker = df_final.iloc[0]["종목코드"]
-            selected_name = df_final.iloc[0]["종목명"]
-    else:
-        st.info("💡 새로고침을 누르면 여기에 종목 순위표가 등장합니다.")
-        selected_ticker = None
-        selected_name = None
+selected_ticker = None
+selected_name = None
 
-# --- 2) 우측 패널: 대표님이 선택한 종목의 실시간 대형 차트 송출 ---
-with col_chart:
-    st.markdown("### 📈 실시간 차트 스튜디오 패널")
-    if selected_ticker:
-        st.markdown(f"#### 🔍 현재 분석 중: **{selected_name} ({selected_ticker})**")
-        
-        # 네이버페이 증권 고기능 모바일/웹 최적화 차트 주소 동적 임베딩 (단타용 거래량 + 이평선 포함)
-        chart_url = f"https://m.stock.naver.com/item/{selected_ticker}/total"
-        
-        # iframe 태그를 이용해 Streamlit 브라우저 내부에 에러 없이 1초 만에 차트 창 바인딩
-        st.components.v1.iframe(chart_url, height=580, scrolling=True)
+if not df_final.empty:
+    df_final.insert(0, "선택", False)
+    df_final.insert(1, "순위", [f"{i+1}위" for i in range(len(df_final))])
+    
+    # 상단 대형 와이드 스크린 격자 데이터 뷰어
+    edited_df = st.data_editor(
+        df_final,
+        use_container_width=True,
+        hide_index=True,
+        column_config={"선택": st.column_config.CheckboxColumn(required=True)},
+        disabled=["순위", "종목코드", "종목명", "수급 등급 분류", "현재가", "등락률", "추정 거래대금", "실전 지침"],
+        height=380
+    )
+    
+    selected_rows = edited_df[edited_df["선택"] == True]
+    if not selected_rows.empty:
+        selected_ticker = selected_rows.iloc[0]["종목코드"]
+        selected_name = selected_rows.iloc[0]["종목명"]
     else:
-        st.info("⬆️ 왼쪽 표에서 원하시는 종목의 [선택] 체크박스를 누르시면 여기에 실시간 차트가 즉시 연동됩니다.")
+        # 미선택 시 수급 1위 대장주 자동 디폴트 차트 세팅
+        selected_ticker = df_final.iloc[0]["종목코드"]
+        selected_name = df_final.iloc[0]["종목명"]
+else:
+    st.info("💡 실시간 주도주 불러오기 버튼을 클릭하시면 전 종목 3단계 분류 그리드가 가동됩니다.")
+
+st.write("---")
+
+# =====================================================================
+# 📈 [하단 구역] 대표님 맞춤형 연결 거부 제로 대형 차트 스튜디오
+# =====================================================================
+st.markdown("### 📈 실시간 하단 초대형 차트 스튜디오 패널")
+
+if selected_ticker:
+    st.success(f"🔍 현재 하단 차트 동기화 완동: **{selected_name} ({selected_ticker})** ➔ 차트 내부에서 마우스 스크롤로 확대/축소 및 분봉 조정이 자유롭게 가능합니다.")
+    
+    # 🛠️ [보안 거부 차단 우회] 외부 프레임 연동을 합법적으로 완벽 수용하는 트레이딩뷰 위젯 임베딩 주소 생성
+    # 국장 주식용 KRX 전용 접두사 매칭 연산
+    tradingview_url = f"https://s.tradingview.com/widgetembed/?frameElementId=tradingview_chart&symbol=KRX%3A{selected_ticker}&interval=D&symboledit=0&saveimage=1&toolbarbg=f1f3f6&studies=%5B%5D&theme=light&style=1&timezone=Asia%2FSeoul&studies_overrides=%7B%7D&overrides=%7B%7D&enabled_features=%5B%5D&disabled_features=%5B%5D&locale=ko&utm_source=localhost&utm_medium=widget&utm_campaign=chart&utm_term=KRX%3A{selected_ticker}"
+    
+    # iframe 태그로 하단 공간에 압도적인 가독성의 고기능 캔들 차트 표출
+    st.components.v1.iframe(tradingview_url, height=650, scrolling=False)
+else:
+    st.info("⬆️ 상단 순위 리스트에서 원하시는 종목의 [선택] 체크박스를 켜시면 하단에 실시간 고기능 차트 모니터가 즉시 가동됩니다.")
