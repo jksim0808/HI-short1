@@ -4,12 +4,13 @@ import requests
 import time
 import os
 import json
+import re
 from datetime import datetime, timezone, timedelta
 
 # =====================================================================
 # ⚙️ [최우선] Streamlit 설정 및 세션 초기화
 # =====================================================================
-st.set_page_config(page_title="관심종목 완벽검색 탑재형 수급 스캐너 Pro", layout="wide")
+st.set_page_config(page_title="대장주 무조건 송출형 수급 스캐너 Pro", layout="wide")
 
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
@@ -34,13 +35,13 @@ TOKEN_FILE = "hantu_token_cache.json"
 # =====================================================================
 # 🖥️ 상단 실시간 통신 진단 모니터
 # =====================================================================
-st.title("🎯 AI 오전 3단계 스캐너 × 네이버 차트 (종목명 공인 마스터판)")
+st.title("🎯 AI 오전 3단계 스캐너 × 네이버 차트 (대장주 무조건 송출 마스터판)")
 st.warning(f"📡 **실시간 라인 진단 모니터:** {st.session_state.net_log}")
 
 st.write("---")
 
 # =====================================================================
-# 🏹 주식 통합 수집 및 공인 이름 복원 엔진
+# 🏹 데이터 탈락 제로(Zero Drop) 하이브리드 엔진
 # =====================================================================
 class HantuGoldenEngine:
     def __init__(self):
@@ -98,21 +99,22 @@ class HantuGoldenEngine:
                 res_data = r.json()
                 output = res_data.get("output", [])
                 
-                st.session_state.net_log = f"🟢 우량주 파이프라인 연동 성공! 10,000원 이하 종목 영구 격리 중 ({current_time_str} 기준)"
+                st.session_state.net_log = f"🟢 수급 파이프라인 무조건 송출 가동 중! 특이종목 탈락 제로 모드 ({current_time_str} 기준)"
                 
                 for item in output:
                     try:
                         ticker = str(item.get("mksc_shrn_iscd", "")).strip()[-6:]
                         name = str(item.get("hts_kor_isnm", item.get("data_name", ""))).strip()
                         
-                        raw_price = item.get("stck_prpr", "0")
-                        raw_ctrt = item.get("prdy_ctrt", "0.0")
-                        raw_volume = item.get("acml_vol", "0")
+                        # 🛠️ [해결] 마이너스 주가 및 공백 문자열 완벽 방어 정화 파싱
+                        raw_price = str(item.get("stck_prpr", "0")).replace("-", "").strip()
+                        raw_ctrt = str(item.get("prdy_ctrt", "0.0")).strip()
+                        raw_volume = str(item.get("acml_vol", "0")).strip()
                         stat_code = str(item.get("iscd_stat_cls_code", "00")).strip()
                         
-                        price = float(raw_price) if str(raw_price).replace('.','',1).isdigit() else 0
-                        ctrt = float(raw_ctrt) if str(raw_ctrt).replace('-','',1).replace('.','',1).isdigit() else 0.0
-                        volume = float(raw_volume) if str(raw_volume).replace('.','',1).isdigit() else 0
+                        price = float(raw_price) if raw_price.replace('.','',1).isdigit() else 0
+                        ctrt = float(raw_ctrt) if raw_ctrt.replace('-','',1).replace('.','',1).isdigit() else 0.0
+                        volume = float(raw_volume) if raw_volume.replace('.','',1).isdigit() else 0
                         
                         amt_val = price * volume
                         
@@ -120,8 +122,10 @@ class HantuGoldenEngine:
                             if any(k in name for k in ["스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF"]): continue
                             if name.endswith("우") or any(name.endswith(f"우{s}") for s in ["B", "C", " 우선주", "1", "2", "3"]): continue
                             
+                            # 순위표 하한선: 오직 현재가 10,000원 미만 잡주만 컷 (주성엔지니어링 등 우량주는 무조건 패스)
                             if price < 10000: continue
                             
+                            # 🛠️ 예외 제거 코드를 전부 파쇄하여 어떤 특이 마크 종목이든 무조건 pool에 적재
                             pool.append((ticker, name, amt_val, price, ctrt, stat_code))
                     except:
                         continue
@@ -142,8 +146,9 @@ class HantuGoldenEngine:
                 res_json = r.json()
                 out = res_json.get("output") if res_json.get("output") else res_json.get("output1")
                 if res_json.get("rt_cd") == "0" and out:
+                    raw_p = str(out.get("stck_prpr", 0)).replace("-", "").strip()
                     return {
-                        "price": float(out.get("stck_prpr", 0)),
+                        "price": float(raw_p) if raw_p.replace('.','',1).isdigit() else 0,
                         "ctrt": float(out.get("prdy_ctrt", 0.0)),
                         "volume": float(out.get("acml_vol", out.get("accl_tr_vol", 0))),
                         "stat": str(out.get("iscd_stat_cls_code", "00")).strip()
@@ -151,22 +156,16 @@ class HantuGoldenEngine:
         except: pass
         return None
 
-    # 🛠️ [완벽 해결] 금융 표준 오픈서버 통합 인덱스를 활용한 한글 이름 다이렉트 변환기
     def fetch_public_stock_name(self, query_code):
-        # 크롤링 보안 제한이 전혀 없는 공용 표준 인덱스 API 연동
-        url = f"https://finance.daum.net/api/quotes/A{query_code}"
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://finance.daum.net"
-        }
+        url = f"https://api.finance.daum.net/api/quotes/A{query_code}"
+        headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.daum.net"}
         try:
             r = self.session.get(url, headers=headers, timeout=3.0)
             if r.status_code == 200:
                 data = r.json()
                 if data and "name" in data:
                     return str(data["name"]).strip()
-        except:
-            pass
+        except: pass
         return f"확인된 종목({query_code})"
 
 # =====================================================================
@@ -174,7 +173,7 @@ class HantuGoldenEngine:
 # =====================================================================
 cc1, cc2 = st.columns([4, 1])
 with cc1:
-    btn_fetch = st.button("🔄 실시간 우량 주도주 새로 불러오기 (10,000원 이상 전용)", type="primary", use_container_width=True)
+    btn_fetch = st.button("🔄 실시간 우량 주도주 새로 불러오기 (대장주 100% 송출)", type="primary", use_container_width=True)
 with cc2:
     btn_clear = st.button("⚠️ 시스템 세션 초기화", type="secondary", use_container_width=True)
 
@@ -187,7 +186,7 @@ if btn_clear:
 
 if btn_fetch:
     st.session_state.last_pool = []
-    with st.spinner("10,000원 이상 수급 노다지 종목 스캔 중..."):
+    with st.spinner("거래대금 최상위 핵심 알짜주 소싱 파이프라인 가동 중..."):
         engine = HantuGoldenEngine()
         token = engine.get_token()
         if token:
@@ -195,11 +194,11 @@ if btn_fetch:
             st.rerun()
 
 # =====================================================================
-# 🛠️ 대표님 관심종목 수동 입력 검색창 섹션 (오류율 0% 보완판)
+# 🛠️ 대표님 관심종목 수동 입력 검색창 섹션
 # =====================================================================
 st.markdown("### 🔍 대표님 관심종목 수동 추적 레이더")
 search_query = st.text_input(
-    "👉 분석하고 싶으신 종목코드 6자리 숫자를 입력하고 엔터(Enter)를 누르세요. (예: 삼성전자 005930, SK하이닉스 000660)",
+    "👉 분석하고 싶으신 종목코드 6자리 숫자를 입력하고 엔터(Enter)를 누르세요. (예: 삼성전자 005930, 주성엔지니어링 036930)",
     value="",
     max_chars=6
 ).strip()
@@ -211,7 +210,6 @@ if search_query and search_query.isdigit() and len(search_query) == 6:
     if token:
         s_res = engine.fetch_single_stock_search(token, search_query)
         if s_res:
-            # 🛠️ 웹페이지 차단 필터를 영구 우회하는 표준 금융 데이터에서 실시간 한글 매칭
             real_stock_name = engine.fetch_public_stock_name(search_query)
             manual_stock_data = {
                 "code": search_query,
@@ -230,7 +228,7 @@ st.markdown("### 📊 실시간 우량주 수급 순위표")
 
 display_list = []
 
-# 1) 표준 이름 마스터 연동이 완료된 수동 입력 데이터 최상단 출력
+# 1) 수동 검색 종목 최상단 고정
 if manual_stock_data:
     t = manual_stock_data["code"]
     n_real = manual_stock_data["name"]
@@ -255,7 +253,7 @@ if manual_stock_data:
         "실전 행동 지침": "🔍 수동 락인 완동! 하단 네이버 차트를 즉시 실시간 분석하세요."
     })
 
-# 2) 한국투자증권 엔진 실시간 10,000원 이상 수급 데이터 바인딩
+# 2) 한투 데이터 맵핑 및 3단계 분류
 if isinstance(st.session_state.last_pool, list) and len(st.session_state.last_pool) > 0:
     for idx, row in enumerate(st.session_state.last_pool):
         if isinstance(row, tuple) and len(row) == 6:
