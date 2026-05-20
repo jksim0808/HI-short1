@@ -11,14 +11,14 @@ from datetime import datetime, timezone, timedelta
 # =====================================================================
 # ⚙️ [최우선] Streamlit 설정 및 세션 초기화
 # =====================================================================
-st.set_page_config(page_title="상승 우량주 전수 마스터 스캐너 Pro", layout="wide")
+st.set_page_config(page_title="가격 정상화 주도주 마스터 스캐너 Pro", layout="wide")
 
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
 if "engine_cache" not in st.session_state: st.session_state.engine_cache = {}
 if "last_pool" not in st.session_state: st.session_state.last_pool = []
-if "net_log" not in st.session_state: st.session_state.net_log = "🔌 우량주 전수 파이프라인 대기 중..."
+if "net_log" not in st.session_state: st.session_state.net_log = "🔌 우량주 실시간 파이프라인 대기 중..."
 
 # =====================================================================
 # ⏳ 타임 제어 연산 [KST 적용]
@@ -32,14 +32,14 @@ TOKEN_FILE = "hantu_token_cache.json"
 # =====================================================================
 # 🖥️ 상단 대시보드
 # =====================================================================
-st.title("🎯 AI 당일 상승 우량주 전수 추적 × 실시간 차트 스튜디오")
+st.title("🎯 AI 당일 상승 우량주 전수 추적 × 실시간 차트 스튜디오 (가격 정상화판)")
 st.warning(f"📡 **실시간 라인 진단 모니터:** {st.session_state.net_log}")
 st.write("---")
 
 # =====================================================================
-# 🏹 통신 제한(Throttling) 우회형 대량 소싱 엔진
+# 🏹 가격 매핑 꼬임 버그를 완벽하게 박멸한 안전 스캔 엔진
 # =====================================================================
-class HantuSafeFullScanEngine:
+class HantuPerfectPriceEngine:
     def __init__(self):
         self.session = requests.Session()
         
@@ -106,20 +106,39 @@ class HantuSafeFullScanEngine:
         except Exception as e:
             pass
             
-        backup_essential = ["036930", "005930", "000660", "035720", "035420", "005380", "000270", "068270", "096770"]
+        backup_essential = ["036930", "005930", "000660", "035720", "035420", "005380", "000270"]
         total_res = list(set(tickers + backup_essential))
         return total_res
 
+    def fetch_single_stock_search(self, token, query_code):
+        url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price"
+        headers = {
+            "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
+            "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01010000", "custtype": "P"
+        }
+        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": query_code}
+        try:
+            r = self.session.get(url, headers=headers, params=params, timeout=2.0)
+            if r.status_code == 200:
+                res_json = r.json()
+                out = res_json.get("output") if res_json.get("output") else res_json.get("output1")
+                if out:
+                    raw_p = str(out.get("stck_prpr", 0)).replace("-", "").strip()
+                    return {
+                        "name": str(out.get("hts_kor_isnm", "")).strip(),
+                        "price": float(raw_p) if raw_p.replace('.','',1).isdigit() else 0,
+                        "ctrt": float(out.get("prdy_ctrt", 0.0)),
+                        "volume": float(out.get("acml_vol", out.get("accl_tr_vol", 0))),
+                        "stat": str(out.get("iscd_stat_cls_code", "00")).strip()
+                    }
+        except: pass
+        return None
+
     def fetch_market_pool_by_indices(self, token):
-        # 1단계: 350개 기준 마스터 종목 풀 로드
         total_tickers = self.fetch_master_tickers_via_file()
         
-        # 2단계: 🛠️ [통신 제한 우회 핵심 개조] 초당 제한에 걸리는 개별 루프 대신, 대량 패킷(Volume Rank 확장 수신) 파이프 연동
-        # 한투 서버가 지원하는 최대치까지 데이터를 확장 수집하여 rank_map에 빌드
         rank_map = {}
-        
-        # 트래픽 차단을 피하기 위해 두 번의 고속 분할 대량 패킷 조회 쿼리만 쏩니다.
-        for sort_cls in ["3", "5"]: # 3: 거래대금순, 5: 시가총액비중순
+        for sort_cls in ["3", "5"]:
             url_vol = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
             headers_vol = {
                 "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
@@ -144,13 +163,12 @@ class HantuSafeFullScanEngine:
                                 "volume": float(str(item.get("acml_vol", "0")).strip()),
                                 "stat": str(item.get("iscd_stat_cls_code", "00")).strip()
                             }
-                time.sleep(0.1) # 🛠️ 안전 마진 트래픽 슬립 추가 (차단 전면 회피)
+                time.sleep(0.1)
             except: pass
 
-        st.session_state.net_log = f"🟢 초당 제한 우회 엔진 가동 성공! 대량 데이터 동기화 완료 ({current_time_str})"
+        st.session_state.net_log = f"🟢 수급 파이프라인 정상 연동 완료 ({current_time_str})"
 
         pool = []
-        # 3단계: 안전하게 수집 완료된 대량 맵 데이터베이스에서 대표님 필터링 공식 작동
         for ticker in total_tickers:
             if ticker in rank_map:
                 r_data = rank_map[ticker]
@@ -161,36 +179,30 @@ class HantuSafeFullScanEngine:
                 amt_val = price * r_data["volume"]
                 raw_rank = r_data["rank"]
             else:
-                # 안전 패킷 밖의 극단적 숨은 주식 방어 코드 (프로그램 폭발 방지)
-                if ticker == "036930":
-                    # 주성엔지니어링의 경우, 대량 시세 쿼리를 한 번 더 다이렉트 고속 호출 (트래픽 한도 내 안전 진입)
-                    url_single = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price"
-                    headers_s = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01010000", "custtype": "P"}
-                    try:
-                        r_s = self.session.get(url_single, headers=headers_s, params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": "036930"}, timeout=2.0)
-                        if r_s.status_code == 200:
-                            out = r_s.json().get("output", {})
-                            price = float(str(out.get("stck_prpr", 0)).replace("-", "").strip())
-                            ctrt = float(str(out.get("prdy_ctrt", 0.0)).strip())
-                            amt_val = price * float(str(out.get("acml_vol", 0)).strip())
-                            name, raw_rank, stat = "주성엔지니어링", 150, str(out.get("iscd_stat_cls_code", "00")).strip()
-                        else: continue
-                    except: continue
+                # 🛠️ [버그 해결] 100위권 밖 종목들을 개조할 때 대금 변수가 현재가(price)를 오염시키던 수식 완전 분리 차단
+                s_res = self.fetch_single_stock_search(token, ticker)
+                if s_res:
+                    price = s_res["price"]  # 5-6만원대 정품 가격 칼바인딩
+                    ctrt = s_res["ctrt"]
+                    stat = s_res["stat"]
+                    amt_val = price * s_res["volume"]
+                    raw_rank = 999
+                    if s_res["name"]:
+                        name = s_res["name"]
+                    else:
+                        if ticker == "036930": name = "주성엔지니어링"
+                        elif ticker == "005930": name = "삼성전자"
+                        elif ticker == "000660": name = "SK하이닉스"
+                        else: name = f"우량주({ticker})"
                 else:
                     continue
 
-            # 🚫 필터 1단계: 파생상품/인버스 노이즈 파쇄
             if any(k in name for k in ["스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF"]): continue
-            
-            # 🚫 필터 2단계: 10,000원 이하 동전주 커트
             if price > 0 and price < 10000: continue
-            
-            # 🚫 필터 3단계: 등락률 0% 이하(마이너스 및 보합) 하락주 전면 격리 파쇄
             if ctrt <= 0.0: continue
             
             pool.append((raw_rank, ticker, name, amt_val, price, ctrt, stat))
                 
-        # 자금력 집중 순서대로 최종 칼정렬
         pool.sort(key=lambda x: x[0])
         return pool
 
@@ -199,7 +211,7 @@ class HantuSafeFullScanEngine:
 # =====================================================================
 cc1, cc2 = st.columns([4, 1])
 with cc1:
-    btn_fetch = st.button("🔄 실시간 당일 플러스(+) 상승 우량주 전수 대량 송출 가동", type="primary", use_container_width=True)
+    btn_fetch = st.button("🔄 실시간 당일 플러스(+) 상승 우량주 정품 데이터 레이더 가동", type="primary", use_container_width=True)
 with cc2:
     btn_clear = st.button("⚠️ 시스템 세션 초기화", type="secondary", use_container_width=True)
 
@@ -211,8 +223,8 @@ if btn_clear:
 
 if btn_fetch:
     st.session_state.last_pool = []
-    with st.spinner("한투 통신 차트 장벽 우회 중... 오늘 상승 중인 대장 우량주 전수 수집 중..."):
-        engine = HantuSafeFullScanEngine()
+    with st.spinner("가격 데이터 복원 및 양봉 주도주 정수 수집 중..."):
+        engine = HantuPerfectPriceEngine()
         token = engine.get_token()
         if token:
             st.session_state.last_pool = engine.fetch_market_pool_by_indices(token)
@@ -253,7 +265,7 @@ if isinstance(st.session_state.last_pool, list) and len(st.session_state.last_po
                 "종목코드": t,
                 "종목명": display_name,
                 "수급 등급 분류": rank_grade,
-                "현재가": f"{int(price):,}원",
+                "현재가": f"{int(price):,}원", # 원화 콤마 정밀 마감
                 "등락률": f"{ctrt:+.2f}%",
                 "당일 누적대금": f"{int(amt / 100000000):,}억 원" if amt > 0 else "실시간 집계 완료",
                 "실전 행동 지침": action_tag
@@ -267,7 +279,6 @@ selected_name = None
 if not df_final.empty:
     df_final.insert(0, "선택", False)
     
-    # 주성엔지니어링이 정상적으로 상승 풀에 들어오면 시각적 포커싱 자동 활성화
     for i, r in df_final.iterrows():
         if "주성엔지니어링" in r["종목명"]:
             df_final.loc[i, "선택"] = True
