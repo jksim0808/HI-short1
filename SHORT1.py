@@ -4,12 +4,13 @@ import requests
 import time
 import os
 import json
+import re
 from datetime import datetime, timezone, timedelta
 
 # =====================================================================
 # ⚙️ [최우선] Streamlit 설정 및 세션 초기화
 # =====================================================================
-st.set_page_config(page_title="관심종목 수동검색 탑재형 수급 스캐너 Pro", layout="wide")
+st.set_page_config(page_title="관심종목 완벽검색 탑재형 수급 스캐너 Pro", layout="wide")
 
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
@@ -34,17 +35,19 @@ TOKEN_FILE = "hantu_token_cache.json"
 # =====================================================================
 # 🖥️ 상단 실시간 통신 진단 모니터
 # =====================================================================
-st.title("🎯 AI 오전 3단계 스캐너 × 네이버 차트 (관심종목 수동검색 탑재판)")
+st.title("🎯 AI 오전 3단계 스캐너 × 네이버 차트 (수동 종목명 자동 매칭판)")
 st.warning(f"📡 **실시간 라인 진단 모니터:** {st.session_state.net_log}")
 
 st.write("---")
 
 # =====================================================================
-# 🏹 10,000원 필터링 및 단독 종목 쿼리 하이브리드 엔진
+# 🏹 수동종목 한글명 매칭 시스템 탑재형 하이브리드 엔진
 # =====================================================================
 class HantuGoldenEngine:
     def __init__(self):
         self.session = requests.Session()
+        # 크롤링 차단 방지용 표준 브라우저 헤더 세팅
+        self.session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
         
     def get_token(self):
         if not APP_KEY or not APP_SECRET:
@@ -120,7 +123,6 @@ class HantuGoldenEngine:
                             if any(k in name for k in ["스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF"]): continue
                             if name.endswith("우") or any(name.endswith(f"우{s}") for s in ["B", "C", " 우선주", "1", "2", "3"]): continue
                             
-                            # 순위표 제한 조건: 현재가 10,000원 미만은 탈락
                             if price < 10000: continue
                             
                             pool.append((ticker, name, amt_val, price, ctrt, stat_code))
@@ -130,7 +132,6 @@ class HantuGoldenEngine:
             st.session_state.net_log = f"❌ 수급 데이터 통신 유실 에러 -> {str(e)}"
         return pool
 
-    # 🛠️ [수동 검색 전용 단독 수급 파싱 API 엔진 신설]
     def fetch_single_stock_search(self, token, query_code):
         url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price"
         headers = {
@@ -152,6 +153,19 @@ class HantuGoldenEngine:
                     }
         except: pass
         return None
+
+    # 🛠️ [신설] 네이버 실시간 금융 인덱스 연동 한글 종목명 추출 파이프라인
+    def fetch_naver_stock_name(self, query_code):
+        url = f"https://finance.naver.com/item/main.naver?code={query_code}"
+        try:
+            r = self.session.get(url, timeout=3.0)
+            if r.status_code == 200:
+                # 정규식을 이용해 네이버 금융 HTML 소스코드 내부의 종목 태그 영역 칼같이 스크래핑
+                match = re.search(r'<title>(.*?)\s*:\s*네이버 페이 증권</title>', r.text)
+                if match:
+                    return match.group(1).strip()
+        except: pass
+        return f"관심종목({query_code})" # 통신 장애 발생 시 방어용 기본 코드값 리턴
 
 # =====================================================================
 # 🖥️ 데이터 제어 버튼 파트
@@ -179,7 +193,7 @@ if btn_fetch:
             st.rerun()
 
 # =====================================================================
-# 🛠️ [신설] 대표님 관심종목 수동 입력 검색창 섹션
+# 🛠️ 대표님 관심종목 수동 입력 검색창 섹션 (한글 이름 복원 기능 가동)
 # =====================================================================
 st.markdown("### 🔍 대표님 관심종목 수동 추적 레이더")
 search_query = st.text_input(
@@ -195,8 +209,11 @@ if search_query and search_query.isdigit() and len(search_query) == 6:
     if token:
         s_res = engine.fetch_single_stock_search(token, search_query)
         if s_res:
+            # 🛠️ 한투 API의 한계를 극복하기 위해 네이버 금융 서버에서 종목명 실시간 추출 연동
+            real_stock_name = engine.fetch_naver_stock_name(search_query)
             manual_stock_data = {
                 "code": search_query,
+                "name": real_stock_name, # 완벽 복원된 한글 이름 주입
                 "price": s_res["price"],
                 "ctrt": s_res["ctrt"],
                 "amt": s_res["price"] * s_res["volume"],
@@ -211,9 +228,10 @@ st.markdown("### 📊 실시간 우량주 수급 순위표")
 
 display_list = []
 
-# 1) 수동 입력 검색 데이터가 있다면 최상단에 강제로 0순위로 꽂아주기
+# 1) 🛠️ 수동으로 한글 종목명 매칭 완료된 데이터 최상단 고정 출력
 if manual_stock_data:
     t = manual_stock_data["code"]
+    n_real = manual_stock_data["name"]
     price = manual_stock_data["price"]
     ctrt = manual_stock_data["ctrt"]
     amt = manual_stock_data["amt"]
@@ -227,7 +245,7 @@ if manual_stock_data:
 
     display_list.append({
         "종목코드": t,
-        "종목명": f"🎯[대표님 수동지정] {stat_prefix}관심종목({t})",
+        "종목명": f"🎯[대표님 수동지정] {stat_prefix}{n_real}", # 코드 대신 한글명이 시원하게 찍힘!
         "수급 등급 분류": "⭐ 대표님 타깃 종목",
         "현재가": f"{int(price):,}원",
         "등락률": f"{ctrt:+.2f}%",
@@ -284,7 +302,6 @@ if not df_final.empty:
     df_final.insert(0, "선택", False)
     df_final.insert(1, "순위", [f"{i+1}위" for i in range(len(df_final))])
     
-    # 만약 수동 지정 종목이 들어왔다면 선택 체크박스를 자동으로 활성화 상태로 유도
     if manual_stock_data:
         df_final.loc[0, "선택"] = True
 
