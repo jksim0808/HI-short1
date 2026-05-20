@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
+import os
+import json
 from datetime import datetime, timezone, timedelta
 
 # =====================================================================
@@ -14,8 +16,6 @@ APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
 if "engine_cache" not in st.session_state: st.session_state.engine_cache = {}
 if "last_pool" not in st.session_state: st.session_state.last_pool = []
-if "hantu_token" not in st.session_state: st.session_state.hantu_token = None
-if "token_expires_at" not in st.session_state: st.session_state.token_expires_at = None
 if "net_log" not in st.session_state: st.session_state.net_log = "🔌 통신 준비 중..."
 
 # =====================================================================
@@ -29,8 +29,10 @@ is_golden_hour = (9 <= now_kst.hour < 12)
 is_before_market = (now_kst.hour < 8)
 is_after_market = (now_kst.hour >= 12)
 
+TOKEN_FILE = "hantu_token_cache.json"
+
 # =====================================================================
-# 🖥️ 상단 실시간 통신 진단 모니터 (★ 에러 추적용 추가)
+# 🖥️ 상단 실시간 통신 진단 모니터
 # =====================================================================
 st.title("⚡ AI 오전 전종목 3단계 실시간 수급 스캐너 (Pro - KST)")
 st.warning(f"📡 **실시간 라인 진단 모니터:** {st.session_state.net_log}")
@@ -38,7 +40,7 @@ st.warning(f"📡 **실시간 라인 진단 모니터:** {st.session_state.net_l
 st.write("---")
 
 # =====================================================================
-# 🏹 크래시 제로(Zero-Crash) 강제 직송 엔진
+# 🏹 1분당 1회 초과 발급 원천방쇄형 파일 캐시 엔진
 # =====================================================================
 class HantuGoldenEngine:
     def __init__(self):
@@ -48,20 +50,44 @@ class HantuGoldenEngine:
         if not APP_KEY or not APP_SECRET:
             st.session_state.net_log = "❌ Secrets 키 설정 오류! 앱 키가 비어있습니다."
             return None
-        now_tz = datetime.now(tz=timezone.utc)
-        if st.session_state.hantu_token and st.session_state.token_expires_at and st.session_state.token_expires_at > now_tz:
-            return st.session_state.hantu_token
+
+        now_utc = datetime.now(tz=timezone.utc)
+
+        # 🛠️ [해결책] 1단계: 파일에 저장된 영구 토큰이 있는지 체크
+        if os.path.exists(TOKEN_FILE):
+            try:
+                with open(TOKEN_FILE, "r") as f:
+                    cache = json.load(f)
+                expire_time = datetime.fromisoformat(cache["expires_at"])
+                
+                # 아직 토큰 유효 시간이 남아있다면 파일에서 꺼내서 즉시 반환 (한투 서버 호출 안함)
+                if expire_time > now_utc and cache.get("token"):
+                    st.session_state.net_log = "🟢 [안전 캐시] 로컬 파일 캐시에서 유효 토큰을 재사용합니다. (안전 구동 중)"
+                    return cache["token"]
+            except:
+                pass
+
+        # 2단계: 파일에 없거나 만료된 경우에만 딱 1번만 한투 서버에 요청
         url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
         try:
             r = self.session.post(url, json={"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}, timeout=4.0)
             if r.status_code == 200:
                 data = r.json()
                 token = data.get("access_token")
-                st.session_state.hantu_token = token
-                st.session_state.token_expires_at = datetime.now(tz=timezone.utc) + timedelta(hours=5)
-                return token
+                if token:
+                    # 유효기간 5시간 설정 후 파일에 쓰기
+                    expires_at = (datetime.now(tz=timezone.utc) + timedelta(hours=5)).isoformat()
+                    with open(TOKEN_FILE, "w") as f:
+                        json.dump({"token": token, "expires_at": expires_at}, f)
+                    
+                    st.session_state.net_log = "🟢 [신규 발급] 한투 서버로부터 안전하게 토큰을 신규 갱신했습니다."
+                    return token
             else:
-                st.session_state.net_log = f"❌ 토큰 발급 HTTP 실패 ({r.status_code}) -> {r.text}"
+                # 🛠️ 디버깅 가시성 강화
+                if "EGW00133" in r.text:
+                    st.session_state.net_log = "❌ [한투 시스템 거부] 1분 제한에 걸렸습니다! 30초만 가만히 기다렸다가 다시 새로고침을 누르세요."
+                else:
+                    st.session_state.net_log = f"❌ 토큰 발급 HTTP 실패 ({r.status_code}) -> {r.text}"
         except Exception as e:
             st.session_state.net_log = f"❌ 인증 서버 연결 실패 -> {str(e)}"
         return None
@@ -82,14 +108,13 @@ class HantuGoldenEngine:
                 res_data = r.json()
                 output = res_data.get("output", [])
                 
-                st.session_state.net_log = f"🟢 한투 통신 성공! 서버 수신 원본 데이터 수: {len(output)}개"
+                st.session_state.net_log = f"🟢 수급 분석 완료! 서버 수신 데이터 수: {len(output)}개 (현재 시각: {current_time_str})"
                 
                 for item in output:
                     try:
                         ticker = str(item.get("mksc_shrn_iscd", "")).strip()[-6:]
                         name = str(item.get("hts_kor_isnm", item.get("data_name", ""))).strip()
                         
-                        # 🛠️ [타입 에러 완벽 방어] 데이터가 비어있거나 이상해도 문자열 처리 후 0 처리
                         raw_amt = item.get("amt", "0")
                         raw_price = item.get("stck_prpr", "0")
                         raw_ctrt = item.get("prdy_ctrt", "0.0")
@@ -99,14 +124,11 @@ class HantuGoldenEngine:
                         ctrt = float(raw_ctrt) if str(raw_ctrt).replace('-','',1).replace('.','',1).isdigit() else 0.0
                         
                         if ticker.isdigit() and name and name != "None":
-                            # 스팩/리츠/인버스 등 노이즈 제거
                             if any(k in name for k in ["스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF"]): continue
                             if name.endswith("우") or any(name.endswith(f"우{s}") for s in ["B", "C", " 우선주", "1", "2", "3"]): continue
                             
-                            # 조건 전면 해제 ➔ 무조건 패스
                             pool.append((ticker, name, amt_val, price, ctrt))
                     except:
-                        # 특정 종목 파싱 중 에러가 나도 튕기지 않고 다음 종목으로 패스
                         continue
             else:
                 st.session_state.net_log = f"❌ 데이터 요청 HTTP 에러 ({r.status_code})"
@@ -119,26 +141,24 @@ class HantuGoldenEngine:
 # =====================================================================
 cc1, cc2 = st.columns([4, 1])
 with cc1:
-    btn_fetch = st.button("🔄 실시간 수급 현황 전체 불러오기 (강제 해제 버전)", type="primary", use_container_width=True)
+    btn_fetch = st.button("🔄 실시간 수급 현황 전체 불러오기 (토큰 잠금 우회 버전)", type="primary", use_container_width=True)
 with cc2:
-    btn_clear = st.button("⚠️ 시스템 세션 강제 초기화", type="secondary", use_container_width=True)
+    btn_clear = st.button("⚠️ 캐시 강제 강제 초기화", type="secondary", use_container_width=True)
 
 if btn_clear:
-    st.session_state.hantu_token = None
-    st.session_state.token_expires_at = None
+    if os.path.exists(TOKEN_FILE):
+        os.remove(TOKEN_FILE)
     st.session_state.last_pool = []
-    st.session_state.net_log = "♻️ 토큰과 메모리가 완전히 비워졌습니다. 다시 불러오기를 누르세요."
+    st.session_state.net_log = "♻️ 로컬 토큰 파일과 메모리가 완전히 청소되었습니다. 1분 뒤 새로고침을 누르세요."
     st.rerun()
 
 if btn_fetch:
     st.session_state.last_pool = []
-    with st.spinner("서버 원본 수급 데이터 다이렉트 바인딩 중..."):
+    with st.spinner("서버 원본 데이터 안전 소싱 중..."):
         engine = HantuGoldenEngine()
         token = engine.get_token()
         if token:
             st.session_state.last_pool = engine.fetch_market_pool(token)
-            if not st.session_state.last_pool and "🟢" in st.session_state.net_log:
-                st.session_state.net_log += " (단, 노이즈 필터링 후 남은 주식이 0개입니다.)"
             st.rerun()
 
 # =====================================================================
@@ -174,4 +194,4 @@ if not df_final.empty:
     df_final.insert(0, "실시간 자금유입 순위", [f"{i+1}위" for i in range(len(df_final))])
     st.dataframe(df_final, use_container_width=True, hide_index=True, height=600)
 else:
-    st.info(f"📊 표가 비어있습니다. 현재 시각은 {current_time_str} 입니다. 위의 노란색 [실시간 라인 진단 모니터] 메시지를 읽고 대응해 주세요.")
+    st.info(f"📊 대기 상태입니다. 위의 모니터 확인 후 [실시간 수급 현황 전체 불러오기]를 눌러주세요.")
