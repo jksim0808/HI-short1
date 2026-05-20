@@ -11,14 +11,14 @@ from datetime import datetime, timezone, timedelta
 # =====================================================================
 # ⚙️ [최우선] Streamlit 설정 및 세션 초기화
 # =====================================================================
-st.set_page_config(page_title="플러스 상승 우량주 마스터 스캐너", layout="wide")
+st.set_page_config(page_title="플러스 상승 우량주 마스터 스캐너 Pro", layout="wide")
 
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
 if "engine_cache" not in st.session_state: st.session_state.engine_cache = {}
 if "last_pool" not in st.session_state: st.session_state.last_pool = []
-if "net_log" not in st.session_state: st.session_state.net_log = "🔌 우량주 파이프라인 대기 중..."
+if "net_log" not in st.session_state: st.session_state.net_log = "🔌 우량주 실시간 파이프라인 대기 중..."
 
 # =====================================================================
 # ⏳ 타임 제어 연산 [KST 적용]
@@ -32,15 +32,15 @@ TOKEN_FILE = "hantu_token_cache.json"
 # =====================================================================
 # 🖥️ 상단 실시간 통신 진단 모니터
 # =====================================================================
-st.title("🎯 코스피 200 × 코스닥 150 플러스 상승 종목 전용 스캐너")
+st.title("🎯 코스피 200 × 코스닥 150 플러스 상승 종목 전용 스캐너 Pro")
 st.warning(f"📡 **실시간 라인 진단 모니터:** {st.session_state.net_log}")
 
 st.write("---")
 
 # =====================================================================
-# 🏹 마이너스 전면 파쇄형 정품 파일 마스터 엔진
+# 🏹 실시간 가격 레이더 연동형 하이브리드 엔진
 # =====================================================================
-class HantuPlusEngine:
+class HantuPlusEnginePro:
     def __init__(self):
         self.session = requests.Session()
         
@@ -106,13 +106,37 @@ class HantuPlusEngine:
                             except: continue
         except: pass
             
-        backup_essential = ["036930", "005930", "000660", "035720", "035420", "005380", "000270", "068270", "005490", "247540", "096770"]
+        # 주성엔지니어링(036930) 등 대표 주도 핵심종목 영구 보완책 가드
+        backup_essential = ["036930", "005930", "000660", "035720", "035420", "005380", "000270"]
         total_res = list(set(tickers + backup_essential))
         return total_res
 
+    def fetch_single_stock_search(self, token, query_code):
+        url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price"
+        headers = {
+            "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
+            "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01010000", "custtype": "P"
+        }
+        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": query_code}
+        try:
+            r = self.session.get(url, headers=headers, params=params, timeout=2.5)
+            if r.status_code == 200:
+                res_json = r.json()
+                out = res_json.get("output") if res_json.get("output") else res_json.get("output1")
+                if out:
+                    raw_p = str(out.get("stck_prpr", 0)).replace("-", "").strip()
+                    return {
+                        "price": float(raw_p) if raw_p.replace('.','',1).isdigit() else 0,
+                        "ctrt": float(out.get("prdy_ctrt", 0.0)),
+                        "volume": float(out.get("acml_vol", out.get("accl_tr_vol", 0))),
+                        "stat": str(out.get("iscd_stat_cls_code", "00")).strip()
+                    }
+        except: pass
+        return None
+
     def fetch_market_pool_by_indices(self, token):
         total_tickers = self.fetch_master_tickers_via_file()
-        st.session_state.net_log = f"🟢 정품 DB 동기화 완료! 우량주 {len(total_tickers)}개 스캔 중 ({current_time_str} 기준)"
+        st.session_state.net_log = f"🟢 지수 데이터베이스 동기화 완료! {len(total_tickers)}개 추적 중 ({current_time_str})"
         
         rank_map = {}
         url_vol = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
@@ -126,7 +150,7 @@ class HantuPlusEngine:
         }
         
         try:
-            r_vol = self.session.get(url_vol, headers=headers_vol, params=params_vol, timeout=5.0)
+            r_vol = self.session.get(url_vol, headers=headers_vol, params=params_vol, timeout=4.0)
             if r_vol.status_code == 200:
                 vol_output = r_vol.json().get("output", [])
                 for rank_idx, item in enumerate(vol_output):
@@ -142,7 +166,11 @@ class HantuPlusEngine:
         except: pass
 
         pool = []
-        for ticker in total_tickers:
+        
+        # 대표 주성엔지니어링 및 고부가가치 우량 종목 위주로 15개 압축 매핑 연산 가동 (트래픽 경량화)
+        target_sub_pool = [t for t in total_tickers if t in rank_map or t in ["036930", "005930", "000660", "035720"]]
+        
+        for ticker in target_sub_pool:
             if ticker in rank_map:
                 r_data = rank_map[ticker]
                 price = r_data["price"]
@@ -152,23 +180,33 @@ class HantuPlusEngine:
                 amt_val = price * r_data["volume"]
                 raw_rank = r_data["rank"]
             else:
-                if ticker == "036930": name = "주성엔지니어링"
-                elif ticker == "005930": name = "삼성전자"
-                elif ticker == "000660": name = "SK하이닉스"
-                else: name = f"우량종목({ticker})"
-                price, ctrt, amt_val, raw_rank, stat = 0, 0.0, 0, 999, "00"
+                # 🛠️ [해결 핵심] 100위권 밖에 있어 랭킹맵에 없으면 강제로 실시간 가격 다이렉트 호출 파이프 가동
+                s_res = self.fetch_single_stock_search(token, ticker)
+                if s_res:
+                    price = s_res["price"]
+                    ctrt = s_res["ctrt"]
+                    stat = s_res["stat"]
+                    amt_val = price * s_res["volume"]
+                    raw_rank = 999
+                    if ticker == "036930": name = "주성엔지니어링"
+                    elif ticker == "005930": name = "삼성전자"
+                    elif ticker == "000660": name = "SK하이닉스"
+                    else: name = f"우량종목({ticker})"
+                else:
+                    continue
 
-            # 🚫 대표님 필터 1단계: 파생상품/인버스 노이즈 소멸
+            # 🚫 필터 1단계: 파생상품/인버스 노이즈 소멸
             if any(k in name for k in ["스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF"]): continue
             
-            # 🚫 대표님 필터 2단계: 10,000원 이하 동전주 커트
+            # 🚫 필터 2단계: 10,000원 이하 동전주 커트
             if price > 0 and price < 10000: continue
             
-            # 🛠️ [핵심 개조] 등락률이 0% 이하(마이너스 및 보합)인 하락 종목은 단타 대상에서 무조건 영구 제외!
+            # 🚫 필터 3단계: 0% 이하(마이너스 및 보합)인 하락 종목 전면 파쇄!
             if ctrt <= 0.0: continue
             
             pool.append((raw_rank, ticker, name, amt_val, price, ctrt, stat))
                 
+        # 자금 활성 순위로 정렬
         pool.sort(key=lambda x: x[0])
         return pool
 
@@ -177,7 +215,7 @@ class HantuPlusEngine:
 # =====================================================================
 cc1, cc2 = st.columns([4, 1])
 with cc1:
-    btn_fetch = st.button("🔄 실시간 플러스(+) 상승 우량주 라인업 동기화", type="primary", use_container_width=True)
+    btn_fetch = st.button("🔄 실시간 플러스(+) 상승 우량 주도주 전체 추적 가동", type="primary", use_container_width=True)
 with cc2:
     btn_clear = st.button("⚠️ 시스템 세션 초기화", type="secondary", use_container_width=True)
 
@@ -189,8 +227,8 @@ if btn_clear:
 
 if btn_fetch:
     st.session_state.last_pool = []
-    with st.spinner("하락주 전면 격리 파쇄! 실시간 양봉 주도주 집계 중..."):
-        engine = HantuPlusEngine()
+    with st.spinner("하락주 무조건 격리 파쇄! 주성엔지니어링 실시간 추적 중..."):
+        engine = HantuPlusEnginePro()
         token = engine.get_token()
         if token:
             st.session_state.last_pool = engine.fetch_market_pool_by_indices(token)
@@ -233,7 +271,7 @@ if isinstance(st.session_state.last_pool, list) and len(st.session_state.last_po
                 "수급 등급 분류": rank_grade,
                 "현재가": f"{int(price):,}원",
                 "등락률": f"{ctrt:+.2f}%",
-                "당일 누적대금": f"{int(amt / 100000000):,}억 원",
+                "당일 누적대금": f"{int(amt / 100000000):,}억 원" if amt > 0 else "실시간 집계 중",
                 "실전 행동 지침": action_tag
             })
 
@@ -270,7 +308,7 @@ if not df_final.empty:
         raw_selected_name = df_final.iloc[0]["종목명"]
         selected_name = raw_selected_name.split("]")[-1].strip()
 else:
-    st.info("💡 스캐너 동기화 완료 대기 중. 위의 버튼을 누르시면 당일 빨간불 우량 주도주만 전개됩니다.")
+    st.info("💡 오늘 대한민국 350대 우량주 중 플러스(+) 상승 중인 종목이 감지되지 않았거나 동기화 대기 중입니다. 상단 버튼을 눌러 스캐너를 가동하세요.")
 
 st.write("---")
 
