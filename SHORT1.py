@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 # =====================================================================
 # ⚙️ [최우선] Streamlit 설정 및 세션 초기화
 # =====================================================================
-st.set_page_config(page_title="오전 집중 3단계 스캐너 × 하단 차트 Pro", layout="wide")
+st.set_page_config(page_title="오전 3단계 스캐너 × 네이버 차트 직송 Pro", layout="wide")
 
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
@@ -34,7 +34,7 @@ TOKEN_FILE = "hantu_token_cache.json"
 # =====================================================================
 # 🖥️ 상단 실시간 통신 진단 모니터
 # =====================================================================
-st.title("🎯 AI 오전 전종목 3단계 스캐너 × 하단 차트 스튜디오")
+st.title("🎯 AI 오전 전종목 3단계 스캐너 × 네이버 실시간 차트")
 st.warning(f"📡 **실시간 라인 진단 모니터:** {st.session_state.net_log}")
 
 st.write("---")
@@ -131,7 +131,7 @@ class HantuGoldenEngine:
 # =====================================================================
 cc1, cc2 = st.columns([4, 1])
 with cc1:
-    btn_fetch = st.button("🔄 실시간 수급 현황 전체 불러오기 (하단 대형 차트 동기화)", type="primary", use_container_width=True)
+    btn_fetch = st.button("🔄 실시간 수급 현황 전체 불러오기 (네이버 차트 동기화)", type="primary", use_container_width=True)
 with cc2:
     btn_clear = st.button("⚠️ 시스템 세션 초기화", type="secondary", use_container_width=True)
 
@@ -188,14 +188,13 @@ if not df_final.empty:
     df_final.insert(0, "선택", False)
     df_final.insert(1, "순위", [f"{i+1}위" for i in range(len(df_final))])
     
-    # 상단 대형 와이드 스크린 격자 데이터 뷰어
     edited_df = st.data_editor(
         df_final,
         use_container_width=True,
         hide_index=True,
         column_config={"선택": st.column_config.CheckboxColumn(required=True)},
         disabled=["순위", "종목코드", "종목명", "수급 등급 분류", "현재가", "등락률", "추정 거래대금", "실전 지침"],
-        height=380
+        height=350
     )
     
     selected_rows = edited_df[edited_df["선택"] == True]
@@ -203,7 +202,6 @@ if not df_final.empty:
         selected_ticker = selected_rows.iloc[0]["종목코드"]
         selected_name = selected_rows.iloc[0]["종목명"]
     else:
-        # 미선택 시 수급 1위 대장주 자동 디폴트 차트 세팅
         selected_ticker = df_final.iloc[0]["종목코드"]
         selected_name = df_final.iloc[0]["종목명"]
 else:
@@ -212,18 +210,24 @@ else:
 st.write("---")
 
 # =====================================================================
-# 📈 [하단 구역] 대표님 맞춤형 연결 거부 제로 대형 차트 스튜디오
+# 📈 [하단 구역] 네이버 실시간 차트 직송 스튜디오 (연결 거부 100% 우회)
 # =====================================================================
-st.markdown("### 📈 실시간 하단 초대형 차트 스튜디오 패널")
+st.markdown("### 📈 네이버 증권 실시간 오리지널 차트 패널")
 
 if selected_ticker:
-    st.success(f"🔍 현재 하단 차트 동기화 완동: **{selected_name} ({selected_ticker})** ➔ 차트 내부에서 마우스 스크롤로 확대/축소 및 분봉 조정이 자유롭게 가능합니다.")
+    st.success(f"🔍 현재 네이버 실시간 차트 연동 완료: **{selected_name} ({selected_ticker})**")
     
-    # 🛠️ [보안 거부 차단 우회] 외부 프레임 연동을 합법적으로 완벽 수용하는 트레이딩뷰 위젯 임베딩 주소 생성
-    # 국장 주식용 KRX 전용 접두사 매칭 연산
-    tradingview_url = f"https://s.tradingview.com/widgetembed/?frameElementId=tradingview_chart&symbol=KRX%3A{selected_ticker}&interval=D&symboledit=0&saveimage=1&toolbarbg=f1f3f6&studies=%5B%5D&theme=light&style=1&timezone=Asia%2FSeoul&studies_overrides=%7B%7D&overrides=%7B%7D&enabled_features=%5B%5D&disabled_features=%5B%5D&locale=ko&utm_source=localhost&utm_medium=widget&utm_campaign=chart&utm_term=KRX%3A{selected_ticker}"
+    # 단타용 탭 구성 (분봉 차트와 일봉 차트를 대표님이 원터치로 교체할 수 있게 배정)
+    tab1, tab2 = st.tabs(["⚡ 단타 필수: 실시간 당일 분봉 차트", "📅 추세 확인: 일봉 차트"])
     
-    # iframe 태그로 하단 공간에 압도적인 가독성의 고기능 캔들 차트 표출
-    st.components.v1.iframe(tradingview_url, height=650, scrolling=False)
+    with tab1:
+        # 🛠️ 네이버 금융 실시간 당일 분봉 차트 서버 이미지 엔진 다이렉트 소싱 주소
+        naver_minute_chart = f"https://ssl.pstatic.net/imgfinance/chart/item/area/day/{selected_ticker}.png?sid={int(time.time())}"
+        st.image(naver_minute_chart, caption=f"[{selected_name}] 네이버 금융 실시간 당일 거래량 매칭 분봉 현황", use_container_width=True)
+        
+    with tab2:
+        # 🛠️ 네이버 금융 실시간 일봉 차트 서버 이미지 엔진 다이렉트 소싱 주소
+        naver_day_chart = f"https://ssl.pstatic.net/imgfinance/chart/item/candle/day/{selected_ticker}.png?sid={int(time.time())}"
+        st.image(naver_day_chart, caption=f"[{selected_name}] 네이버 금융 실시간 일봉 캔들 현황", use_container_width=True)
 else:
-    st.info("⬆️ 상단 순위 리스트에서 원하시는 종목의 [선택] 체크박스를 켜시면 하단에 실시간 고기능 차트 모니터가 즉시 가동됩니다.")
+    st.info("⬆️ 상단 순위 리스트에서 원하시는 종목의 [선택] 체크박스를 켜시면 하단에 네이버 오리지널 차트 모니터가 즉시 가동됩니다.")
