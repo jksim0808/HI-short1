@@ -9,14 +9,14 @@ from datetime import datetime, timezone, timedelta
 # =====================================================================
 # ⚙️ [최우선] Streamlit 설정 및 세션 초기화
 # =====================================================================
-st.set_page_config(page_title="100위권 우량 주도주 마스터 스캐너", layout="wide")
+st.set_page_config(page_title="국대 우량주 지수 전수 마스터 스캐너", layout="wide")
 
 APP_KEY = st.secrets.get("HANTU_APP_KEY", "").strip()
 APP_SECRET = st.secrets.get("HANTU_APP_SECRET", "").strip()
 
 if "engine_cache" not in st.session_state: st.session_state.engine_cache = {}
 if "last_pool" not in st.session_state: st.session_state.last_pool = []
-if "net_log" not in st.session_state: st.session_state.net_log = "🔌 통신 준비 중..."
+if "net_log" not in st.session_state: st.session_state.net_log = "🔌 우량주 통신 라인 대기 중..."
 
 # =====================================================================
 # ⏳ 타임 제어 연산 [KST 적용]
@@ -30,15 +30,15 @@ TOKEN_FILE = "hantu_token_cache.json"
 # =====================================================================
 # 🖥️ 상단 실시간 통신 진단 모니터
 # =====================================================================
-st.title("🎯 AI 1위~100위 우량 주도주 매칭 마스터 스캐너")
+st.title("🎯 코스피 200 × 코스닥 150 전수 수급 마스터 스캐너")
 st.warning(f"📡 **실시간 라인 진단 모니터:** {st.session_state.net_log}")
 
 st.write("---")
 
 # =====================================================================
-# 🏹 1위~100위 전수 수집 및 하이브리드 필터링 엔진
+# 🏹 코스피200 / 코스닥150 결합형 대장주 추적 엔진
 # =====================================================================
-class HantuMasterEngine:
+class HantuIndexMasterEngine:
     def __init__(self):
         self.session = requests.Session()
         
@@ -47,7 +47,7 @@ class HantuMasterEngine:
             st.session_state.net_log = "❌ Secrets 키 설정 오류! 앱 키가 비어있습니다."
             return None
 
-        now_utc = datetime.now(tz=timezone.utc)
+        now_utc = datetime.utcnow().replace(tzinfo=timezone.utc)
 
         if os.path.exists(TOKEN_FILE):
             try:
@@ -66,7 +66,7 @@ class HantuMasterEngine:
                 data = r.json()
                 token = data.get("access_token")
                 if token:
-                    expires_at = (datetime.now(tz=timezone.utc) + timedelta(hours=5)).isoformat()
+                    expires_at = (datetime.utcnow() + timedelta(hours=5)).isoformat()
                     with open(TOKEN_FILE, "w") as f:
                         json.dump({"token": token, "expires_at": expires_at}, f)
                     return token
@@ -76,58 +76,95 @@ class HantuMasterEngine:
             st.session_state.net_log = f"❌ 인증 연결 실패 -> {str(e)}"
         return None
 
-    def fetch_master_volume_rank(self, token):
-        pool = []
-        url_vol = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
+    def fetch_index_components(self, token, iscd_code):
+        """
+        한투 주식지수구성종목 API 호출
+        0001: 코스피 200, 2001: 코스닥 150
+        """
+        url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-index-category-master"
+        headers = {
+            "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
+            "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01100000", "custtype": "P"
+        }
+        params = {"FID_COND_MRKT_DIV_CODE": "U", "FID_INPUT_ISCD": iscd_code}
         
+        tickers = []
+        try:
+            r = self.session.get(url, headers=headers, params=params, timeout=6.0)
+            if r.status_code == 200:
+                res_data = r.json()
+                output = res_data.get("output", [])
+                for item in output:
+                    t_code = str(item.get("mksc_shrn_iscd", "")).strip()[-6:]
+                    if t_code.isdigit():
+                        tickers.append(t_code)
+        except: pass
+        return tickers
+
+    def fetch_market_pool_by_indices(self, token):
+        # 1단계: 코스피 200 (0001) 및 코스닥 150 (2001) 정예 마스터 종목 코드 전수 싱크
+        kospi200_tickers = self.fetch_index_components(token, "0001")
+        kosdaq150_tickers = self.fetch_index_components(token, "2001")
+        
+        total_tickers = list(set(kospi200_tickers + kosdaq150_tickers))
+        
+        if not total_tickers:
+            st.session_state.net_log = "⚠️ 한국거래소 지수 파이프라인 동기화 지연 -> 재시도 필요"
+            return []
+            
+        st.session_state.net_log = f"🟢 양대지수 정예 {len(total_tickers)}개 종목 락인 완료! 실시간 수급 계측 중..."
+        
+        # 2단계: 거래대금 상위 순위 뼈대를 매칭하기 위해 volume-rank 호출하여 랭킹 마스터 데이터 확보
+        rank_map = {}
+        url_vol = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
         headers_vol = {
             "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
             "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01710000", "custtype": "P"
         }
         params_vol = {
             "FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20171",
-            "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_SORT_CLS_CODE": "3" # 거래대금순 상위 소싱
+            "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_SORT_CLS_CODE": "3"
         }
+        
         try:
-            r = self.session.get(url_vol, headers=headers_vol, params=params_vol, timeout=5.0)
-            if r.status_code == 200:
-                res_data = r.json()
-                output = res_data.get("output", [])
+            r_vol = self.session.get(url_vol, headers=headers_vol, params=params_vol, timeout=5.0)
+            if r_vol.status_code == 200:
+                vol_output = r_vol.json().get("output", [])
+                for rank_idx, item in enumerate(vol_output):
+                    t_code = str(item.get("mksc_shrn_iscd", "")).strip()[-6:]
+                    rank_map[t_code] = {
+                        "rank": rank_idx + 1,
+                        "name": str(item.get("hts_kor_isnm", item.get("data_name", ""))).strip(),
+                        "price": float(str(item.get("stck_prpr", "0")).replace("-", "").strip()),
+                        "ctrt": float(str(item.get("prdy_ctrt", "0.0")).strip()),
+                        "volume": float(str(item.get("acml_vol", "0")).strip()),
+                        "stat": str(item.get("iscd_stat_cls_code", "00")).strip()
+                    }
+        except: pass
+
+        pool = []
+        # 3단계: 지수 구성 종목 중에서 자금이 도는 종목들을 순위 맵에서 매핑 및 정제
+        for ticker in total_tickers:
+            if ticker in rank_map:
+                r_data = rank_map[ticker]
+                price = r_data["price"]
+                name = r_data["name"]
+                ctrt = r_data["ctrt"]
+                stat = r_data["stat"]
+                amt_val = price * r_data["volume"]
+                raw_rank = r_data["rank"]
                 
-                st.session_state.net_log = f"🟢 한투 오피셜 100위권 파이프라인 연동 성공! 리스크 정화 중 ({current_time_str} 기준)"
+                # 🚫 대표님 필터 1단계: 파생상품/인버스/리츠 노이즈 자동 소멸
+                if any(k in name for k in ["스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF"]): continue
                 
-                # 한투 서버가 보내주는 100개 풀을 원본 순위(idx)를 유지한 채 전수 파싱
-                for idx, item in enumerate(output):
-                    try:
-                        raw_rank = idx + 1
-                        ticker = str(item.get("mksc_shrn_iscd", "")).strip()[-6:]
-                        name = str(item.get("hts_kor_isnm", item.get("data_name", ""))).strip()
-                        
-                        raw_price = str(item.get("stck_prpr", "0")).replace("-", "").strip()
-                        raw_ctrt = str(item.get("prdy_ctrt", "0.0")).strip()
-                        raw_volume = str(item.get("acml_vol", "0")).strip()
-                        stat_code = str(item.get("iscd_stat_cls_code", "00")).strip()
-                        
-                        price = float(raw_price) if raw_price.replace('.','',1).isdigit() else 0
-                        ctrt = float(raw_ctrt) if raw_ctrt.replace('-','',1).replace('.','',1).isdigit() else 0.0
-                        volume = float(raw_volume) if raw_volume.replace('.','',1).isdigit() else 0
-                        
-                        amt_val = price * volume
-                        
-                        if ticker.isdigit() and name and name != "None":
-                            # 🚫 필터 1단계: 스팩/ETF/ETN/인버스/레버리지 노이즈 무조건 파쇄
-                            if any(k in name for k in ["스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF"]): continue
-                            if name.endswith("우") or any(name.endswith(f"우{s}") for s in ["B", "C", " 우선주", "1", "2", "3"]): continue
-                            
-                            # 🚫 필터 2단계: 만원 이하 잡주/동전주 철저 격리 차단 (우량주만 통과)
-                            if price < 10000: continue
-                            
-                            # 원본 랭킹 번호(`raw_rank`)를 들고 메인 리스트 구축
-                            pool.append((raw_rank, ticker, name, amt_val, price, ctrt, stat_code))
-                    except:
-                        continue
-        except Exception as e:
-            st.session_state.net_log = f"❌ 마스터 데이터 수집 무력화 에러 -> {str(e)}"
+                # 🚫 대표님 필터 2단계: 10,000원 이하 동전주/잡주 격리 커트
+                if price < 10000: continue
+                
+                # 주성엔지니어링 등 조건 통과한 핵심 우량주들만 안전 적재
+                pool.append((raw_rank, ticker, name, amt_val, price, ctrt, stat))
+                
+        # 수급 활성도가 높은 순(거래대금 순위가 높은 순)으로 최종 칼정렬
+        pool.sort(key=lambda x: x[0])
         return pool
 
 # =====================================================================
@@ -135,29 +172,29 @@ class HantuMasterEngine:
 # =====================================================================
 cc1, cc2 = st.columns([4, 1])
 with cc1:
-    btn_fetch = st.button("🔄 실시간 1위~100위 오피셜 주도주 새로고침 (클린 우량주 버전)", type="primary", use_container_width=True)
+    btn_fetch = st.button("🔄 실시간 양대 지수(코스피200·코스닥150) 우량 주도주 전수 동기화", type="primary", use_container_width=True)
 with cc2:
     btn_clear = st.button("⚠️ 시스템 세션 초기화", type="secondary", use_container_width=True)
 
 if btn_clear:
     if os.path.exists(TOKEN_FILE): os.remove(TOKEN_FILE)
     st.session_state.last_pool = []
-    st.session_state.net_log = "♻️ 캐시 메모리가 청소되었습니다. 새로고침을 누르세요."
+    st.session_state.net_log = "♻️ 시스템 캐시 메모리가 소독되었습니다."
     st.rerun()
 
 if btn_fetch:
     st.session_state.last_pool = []
-    with st.spinner("대한민국 거래대금 100위권 전수 계측 및 테마 필터링 중..."):
-        engine = HantuMasterEngine()
+    with st.spinner("대한민국 국가대표 우량주 350개 전수 계측 시스템 기동 중..."):
+        engine = HantuIndexMasterEngine()
         token = engine.get_token()
         if token:
-            st.session_state.last_pool = engine.fetch_master_volume_rank(token)
+            st.session_state.last_pool = engine.fetch_market_pool_by_indices(token)
             st.rerun()
 
 # =====================================================================
-# 📊 [상단 구역] 1위~100위 원본 연동 우량주 종합 수급 표
+# 📊 [상단 구역] 양대 지수 연동형 우량주 전용 통합 수급 표
 # =====================================================================
-st.markdown("### 📊 실시간 거래대금 100위권 정제 순위표 (원하는 종목의 체크박스를 켜세요)")
+st.markdown("### 📊 실시간 350대 우량주 수급 순위표 (원하는 종목의 체크박스를 선택하세요)")
 
 display_list = []
 if isinstance(st.session_state.last_pool, list) and len(st.session_state.last_pool) > 0:
@@ -165,39 +202,39 @@ if isinstance(st.session_state.last_pool, list) and len(st.session_state.last_po
         if isinstance(row, tuple) and len(row) == 7:
             raw_rank, t, n, amt, price, ctrt, stat = row
             
-            # 실시간 호가 상태 기호 판독
+            # 실시간 VI 및 호가 정지 상태 기호 판독
             stat_prefix = ""
             if stat in ["58", "59"]: stat_prefix = "[🚨VI발동] "
             elif stat == "52": stat_prefix = "[⚠️유의] "
             elif stat == "51": stat_prefix = "[❌관리] "
             elif stat == "57": stat_prefix = "[🔥경고] "
 
-            # 🛠️ [테마주 마킹 및 3단계 우선순위 매칭 구조]
-            if raw_rank <= 20 and ctrt >= 10.0:
-                display_name = f"🔥[1순위-최강주도] {stat_prefix}{n}"
-                rank_grade = "🔥 1단계: A급 (최강 주도주)"
-                action_tag = "🚀 대한민국 시장 자금 블랙홀 (최우선 공략)"
-            elif raw_rank > 20 and ctrt >= 10.0:
-                display_name = f"💎[2순위-주도대장] {stat_prefix}{n}"
-                rank_grade = "🔥 1단계: A급 (신상 대장주)"
-                action_tag = "💎 순위는 낮지만 힘이 응축된 신상 테마 대장주 (강추)"
+            # 🛠️ 지수 전수 조사 전용 주도테마 마킹 알고리즘
+            if raw_rank <= 30 and ctrt >= 10.0:
+                display_name = f"🔥[우량주도-최강] {stat_prefix}{n}"
+                rank_grade = "🔥 1단계: A급 (지수 주도주)"
+                action_tag = "🚀 대한민국 시장 돈을 싹 쓸어담는 핵심 대장 (최우선 공략)"
+            elif ctrt >= 10.0:
+                display_name = f"💎[우량주도-대장] {stat_prefix}{n}"
+                rank_grade = "🔥 1단계: A급 (시세 분출)"
+                action_tag = "💎 순위와 무관하게 힘이 폭발하는 지수 내 테마 대장주"
             elif ctrt >= 1.0 and ctrt < 10.0:
                 display_name = f"{stat_prefix}{n}"
-                rank_grade = "⚡ 2단계: B급 (후발/단기)"
-                action_tag = "🟢 수급 유입 및 추세 유지 / 짧은 스캘핑"
+                rank_grade = "⚡ 2단계: B급 (견고한 흐름)"
+                action_tag = "🟢 수급 유입 완료 / 1분봉 눌림목 스캘핑"
             else:
                 display_name = f"{stat_prefix}{n}"
-                rank_grade = "⚪ 3단계: C급 (보합이하)"
-                action_tag = "🟡 자금 회전용 횡보 구역 (매매 자제)"
+                rank_grade = "⚪ 3단계: C급 (숨고르기)"
+                action_tag = "🟡 대금 유입 대기 / 지지선 횡보 관망 구역"
 
             display_list.append({
-                "한투 오피셜 순위": f"{raw_rank}위",
+                "시장 자금 순위": f"{raw_rank}위" if raw_rank <= 100 else "100위권 밖",
                 "종목코드": t,
                 "종목명": display_name,
                 "수급 등급 분류": rank_grade,
                 "현재가": f"{int(price):,}원",
                 "등락률": f"{ctrt:+.2f}%",
-                "실시간 거래대금": f"{int(amt / 100000000):,}억 원",
+                "당일 누적대금": f"{int(amt / 100000000):,}억 원",
                 "실전 행동 지침": action_tag
             })
 
@@ -209,12 +246,18 @@ selected_name = None
 if not df_final.empty:
     df_final.insert(0, "선택", False)
     
+    # 대표 주성엔지니어링이 리스트에 포착되었을 경우 최적의 시각적 락인을 위해 기본 포커싱 유도
+    for i, r in df_final.iterrows():
+        if "주성엔지니어링" in r["종목명"]:
+            df_final.loc[i, "선택"] = True
+            break
+
     edited_df = st.data_editor(
         df_final,
         use_container_width=True,
         hide_index=True,
         column_config={"선택": st.column_config.CheckboxColumn(required=True)},
-        disabled=["한투 오피셜 순위", "종목코드", "종목명", "수급 등급 분류", "현재가", "등락률", "실시간 거래대금", "실전 행동 지침"],
+        disabled=["시장 자금 순위", "종목코드", "종목명", "수급 등급 분류", "현재가", "등락률", "당일 누적대금", "실전 행동 지침"],
         height=380
     )
     
@@ -228,7 +271,7 @@ if not df_final.empty:
         raw_selected_name = df_final.iloc[0]["종목명"]
         selected_name = raw_selected_name.split("]")[-1].strip()
 else:
-    st.info("💡 장중 실시간 수급 동기화 대기 중입니다. 상단 버튼을 눌러 스캐너를 가동해 주세요.")
+    st.info("💡 우량주 통합 스캐너 가동 준비 완료. 위의 동기화 버튼을 클릭하시면 350대 정예 라인업이 전개됩니다.")
 
 st.write("---")
 
@@ -245,10 +288,10 @@ if selected_ticker:
     
     with tab1:
         naver_minute_chart = f"https://ssl.pstatic.net/imgfinance/chart/item/area/day/{selected_ticker}.png?v={time_seed}"
-        st.image(naver_minute_chart, caption=f"[{selected_name}] 네이버 실시간 분봉 및 장중 자금 유입 흐름", use_container_width=True)
+        st.image(naver_minute_chart, caption=f"[{selected_name}] 네이버 실시간 분봉 및 당일 세력 거래량 분석", use_container_width=True)
         
     with tab2:
         naver_day_chart = f"https://ssl.pstatic.net/imgfinance/chart/item/candle/day/{selected_ticker}.png?v={time_seed}"
-        st.image(naver_day_chart, caption=f"[{selected_name}] 네이버 실시간 일봉 누적 캔들 추세", use_container_width=True)
+        st.image(naver_day_chart, caption=f"[{selected_name}] 네이버 실시간 일봉 캔들 추세 지지선", use_container_width=True)
 else:
     st.info("⬆ 상단 순위 리스트에서 원하시는 종목의 [선택] 체크박스를 켜시면 하단에 네이버 오리지널 차트가 표출됩니다.")
