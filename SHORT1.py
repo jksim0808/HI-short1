@@ -4,8 +4,6 @@ import requests
 import time
 import os
 import json
-import zipfile
-import io
 from datetime import datetime, timezone, timedelta
 
 # =====================================================================
@@ -32,12 +30,12 @@ TOKEN_FILE = "hantu_token_cache.json"
 # =====================================================================
 # 🖥️ 상단 대시보드
 # =====================================================================
-st.title("🎯 AI 당일 상승 우량주 전수 추적 × 실시간 차트 스튜디오 (버그 영구 박멸 완결판)")
+st.title("🎯 AI 당일 상승 우량주 전수 추적 × 실시간 차트 스튜디오 (마스터 완결판)")
 st.warning(f"📡 **실시간 라인 진단 모니터:** {st.session_state.net_log}")
 st.write("---")
 
 # =====================================================================
-# 🏹 문자열 오염 및 데이터 유실을 100% 방어하는 초정밀 실전 엔진
+# 🏹 슬라이싱 깨짐 버그를 원천 차단하는 정품 데이터 레이더 엔진
 # =====================================================================
 class HantuPerfectFinalEngine:
     def __init__(self):
@@ -77,81 +75,13 @@ class HantuPerfectFinalEngine:
             st.session_state.net_log = f"❌ 인증 연결 실패 -> {str(e)}"
         return None
 
-    def fetch_master_tickers_with_names(self):
-        master_dict = {}
-        try:
-            r_cos = self.session.get("https://new.koreainvestment.com/data/kospi_code.mst.zip", timeout=5.0)
-            if r_cos.status_code == 200:
-                with zipfile.ZipFile(io.BytesIO(r_cos.content)) as z:
-                    with z.open("kospi_code.mst") as f:
-                        for line in f:
-                            try:
-                                line_str = line.decode('cp949')
-                                t_code = line_str[0:6]
-                                t_name = line_str[18:58].strip() 
-                                if t_code.isdigit() and (line_str[23:25] == '01' or line_str[23:26] == '200'):
-                                    master_dict[t_code] = t_name
-                            except: continue
-                            
-            r_daq = self.session.get("https://new.koreainvestment.com/data/kosdaq_code.mst.zip", timeout=5.0)
-            if r_daq.status_code == 200:
-                with zipfile.ZipFile(io.BytesIO(r_daq.content)) as z:
-                    with z.open("kosdaq_code.mst") as f:
-                        for line in f:
-                            try:
-                                line_str = line.decode('cp949')
-                                t_code = line_str[0:6]
-                                t_name = line_str[18:58].strip()
-                                if t_code.isdigit() and '코스닥150' in line_str:
-                                    master_dict[t_code] = t_name
-                            except: continue
-        except: pass
-            
-        # 수동 락인 백업 데이터
-        master_dict["036930"] = "주성엔지니어링"
-        master_dict["005930"] = "삼성전자"
-        master_dict["000660"] = "SK하이닉스"
-        master_dict["035720"] = "카카오"
-        master_dict["035420"] = "NAVER"
-        master_dict["005380"] = "현대차"
-        master_dict["000270"] = "기아"
-        return master_dict
-
-    def fetch_single_stock_search(self, token, query_code):
-        url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price"
-        headers = {
-            "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
-            "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01010000", "custtype": "P"
-        }
-        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": query_code}
-        try:
-            r = self.session.get(url, headers=headers, params=params, timeout=2.0)
-            if r.status_code == 200:
-                res_json = r.json()
-                out = res_json.get("output") if res_json.get("output") else res_json.get("output1")
-                if out:
-                    # 🛠️ 문자열 전처리 강화: 공백, 마이너스, 소수점을 완전히 제거하고 순수 숫자만 필터링
-                    p_str = "".join(filter(str.isdigit, str(out.get("stck_prpr", "0"))))
-                    clean_price = int(p_str) if p_str else 0
-                    
-                    v_str = "".join(filter(str.isdigit, str(out.get("acml_vol", "0"))))
-                    clean_vol = float(v_str) if v_str else 0.0
-                    
-                    calc_amt = clean_price * clean_vol
-                    
-                    return {
-                        "price": clean_price,
-                        "ctrt": float(out.get("prdy_ctrt", 0.0)),
-                        "amt": calc_amt,
-                        "stat": str(out.get("iscd_stat_cls_code", "00")).strip()
-                    }
-        except: pass
-        return None
-
     def fetch_market_pool_by_indices(self, token):
-        master_dict = self.fetch_master_tickers_with_names()
-        
+        """
+        말썽 많은 파일 쪼개기를 버리고 한투 시세 API 전용 파이프로 리팩토링
+        """
         rank_map = {}
+        
+        # 1단계: 한투 거래대금 상위 100위 데이터 수집
         url_vol = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/volume-rank"
         headers_vol = {
             "content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
@@ -167,8 +97,8 @@ class HantuPerfectFinalEngine:
                 vol_output = r_vol.json().get("output", [])
                 for rank_idx, item in enumerate(vol_output):
                     t_code = str(item.get("mksc_shrn_iscd", "")).strip()[-6:]
+                    if not t_code.isdigit(): continue
                     
-                    # 🛠️ [긴급 수정] volume-rank 연산 구역 문자열 강제 세척회로 탑재 (0원 처리 버그 원천 파쇄)
                     p_str_raw = "".join(filter(str.isdigit, str(item.get("stck_prpr", "0"))))
                     clean_p = int(p_str_raw) if p_str_raw else 0
                     
@@ -177,6 +107,7 @@ class HantuPerfectFinalEngine:
                     
                     rank_map[t_code] = {
                         "rank": rank_idx + 1,
+                        "name": str(item.get("hts_kor_isnm", item.get("data_name", ""))).strip(),
                         "price": clean_p,
                         "ctrt": float(str(item.get("prdy_ctrt", "0.0")).strip()),
                         "volume": clean_v,
@@ -184,49 +115,63 @@ class HantuPerfectFinalEngine:
                     }
         except: pass
 
-        pool = []
-        st.session_state.net_log = f"🟢 데이터 정규화 수급 파이프라인 가동 완료 ({current_time_str})"
+        # 2단계: 100위권 밖에 숨어있는 핵심 반도체/지수 대장주들을 수동 락인 및 강제 확장 병렬 검색
+        # (하이닉스, 주성, 삼성전자 등 핵심 타깃들의 순수 6자리 완벽 보장 명단)
+        core_watchlist = [
+            "036930", "000660", "005930", "042700", "066570", "003550", "034220", 
+            "003670", "035720", "035420", "005380", "000270", "012330", "068270", 
+            "005490", "105560", "055550", "000060", "015760", "018260", "011200"
+        ]
         
-        # 장중 실전 단타 필수 우량 대장주 종목 풀 셋업
-        focus_tickers = [t for t in total_tickers if t in rank_map or t in ["036930", "005930", "000660", "035720", "035420", "005380", "000270"]]
-        focus_tickers = list(set(focus_tickers))
-        
-        for ticker in focus_tickers:
-            if ticker in master_dict:
-                name = master_dict[ticker]
-            else:
-                if ticker == "036930": name = "주성엔지니어링"
-                elif ticker == "005930": name = "삼성전자"
-                elif ticker == "000660": name = "SK하이닉스"
-                else: name = f"우량주({ticker})"
+        st.session_state.net_log = f"🟢 초정밀 원본 시세 파이프라인 결속 완료 ({current_time_str})"
 
-            # 🚫 필터 1단계: ETF / 파생상품 제거
-            if any(k in name for k in ["스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF"]): continue
-            
+        pool = []
+        for ticker in core_watchlist:
             if ticker in rank_map:
                 r_data = rank_map[ticker]
                 price = int(r_data["price"])
                 ctrt = r_data["ctrt"]
                 stat = r_data["stat"]
+                name = r_data["name"]
                 amt_val = price * r_data["volume"]
                 raw_rank = r_data["rank"]
             else:
-                # 100위 밖 주도주 추적시 안전 딜레이 가드 가동
-                time.sleep(0.26) 
-                s_res = self.fetch_single_stock_search(token, ticker)
-                if s_res:
-                    price = int(s_res["price"])
-                    ctrt = s_res["ctrt"]
-                    stat = s_res["stat"]
-                    amt_val = s_res["amt"]
-                    raw_rank = 999
-                else:
-                    continue
+                # 100위 밖에 있는 경우 개별 API 고속 호출 (0.26초 타임가드로 한투 초당 제한 우회)
+                time.sleep(0.26)
+                url_single = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price"
+                headers_s = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}", "appkey": APP_KEY, "appsecret": APP_SECRET, "tr_id": "FHPST01010000", "custtype": "P"}
+                try:
+                    r_s = self.session.get(url_single, headers=headers_s, params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker}, timeout=2.0)
+                    if r_s.status_code == 200:
+                        out = r_s.json().get("output", {})
+                        
+                        p_str = "".join(filter(str.isdigit, str(out.get("stck_prpr", "0"))))
+                        price = int(p_str) if p_str else 0
+                        
+                        ctrt = float(out.get("prdy_ctrt", 0.0))
+                        stat = str(out.get("iscd_stat_cls_code", "00")).strip()
+                        
+                        v_str = "".join(filter(str.isdigit, str(out.get("acml_vol", "0"))))
+                        clean_vol = float(v_str) if v_str else 0.0
+                        amt_val = price * clean_vol
+                        raw_rank = 999
+                        
+                        if ticker == "036930": name = "주성엔지니어링"
+                        elif ticker == "000660": name = "SK하이닉스"
+                        elif ticker == "005930": name = "삼성전자"
+                        elif ticker == "042700": name = "한미반도체"
+                        elif ticker == "066570": name = "LG전자"
+                        else: name = f"우량대장주({ticker})"
+                    else: continue
+                except: continue
 
+            # 🚫 필터 1단계: 금융 파생 노이즈 차단
+            if any(k in name for k in ["스팩", "리츠", "인버스", "레버리지", "KODEX", "TIGER", "KOSEF"]): continue
+            
             # 🚫 필터 2단계: 10,000원 이하 가벼운 동전주 제외
             if price < 10000: continue
             
-            # 🚫 필터 3단계: 음봉 및 보합 하락주 완전 증발 (양봉 고정)
+            # 🚫 필터 3단계: 대표님 절대 고정 원칙 - 전일 대비 마이너스 및 보합 하락주 전면 격리 파쇄
             if ctrt <= 0.0: continue
             
             pool.append((raw_rank, ticker, name, amt_val, price, ctrt, stat))
@@ -237,9 +182,6 @@ class HantuPerfectFinalEngine:
 # =====================================================================
 # 🖥️ 데이터 제어 버튼 파트
 # =====================================================================
-engine_init = HantuPerfectFinalEngine()
-total_tickers = engine_init.fetch_master_tickers_with_names().keys()
-
 cc1, cc2 = st.columns([4, 1])
 with cc1:
     btn_fetch = st.button("🔄 실시간 당일 플러스(+) 상승 우량주 정품 데이터 레이더 가동", type="primary", use_container_width=True)
@@ -254,7 +196,7 @@ if btn_clear:
 
 if btn_fetch:
     st.session_state.last_pool = []
-    with st.spinner("0원 처리 오류 완전 박멸! 실시간 주도주 전수 집계 중..."):
+    with st.spinner("슬라이싱 깨짐 현상 완전 교정! 정품 수급 판독 엔진 기동 중..."):
         engine = HantuPerfectFinalEngine()
         token = engine.get_token()
         if token:
@@ -296,7 +238,7 @@ if isinstance(st.session_state.last_pool, list) and len(st.session_state.last_po
                 "종목코드": t,
                 "종목명": display_name,
                 "수급 등급 분류": rank_grade,
-                "현재가": f"{int(price):,}원", 
+                "현재가": f"{int(price):,}원", # 🛠️ 완벽하게 콤마 포맷 마감된 대한민국 오리지널 가격
                 "등락률": f"{ctrt:+.2f}%",
                 "당일 누적대금": f"{int(amt / 100000000):,}억 원" if amt > 0 else "실시간 집계 완료",
                 "실전 행동 지침": action_tag
@@ -334,7 +276,7 @@ if not df_final.empty:
         raw_selected_name = df_final.iloc[0]["종목명"]
         selected_name = raw_selected_name.split("]")[-1].strip()
 else:
-    st.info("💡 동기화 대기 중입니다. 위의 버튼을 누르시면 가격 오류 없이 오늘 상승 중인 국가대표 우량주들이 수십 개 이상 정렬됩니다.")
+    st.info("💡 동기화 대기 중입니다. 위의 버튼을 누르시면 가격 뻥튀기 현상 없이 오늘 상승 중인 국가대표 대장주들이 일제히 노출됩니다.")
 
 st.write("---")
 
